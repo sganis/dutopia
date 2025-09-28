@@ -61,6 +61,9 @@ struct Args {
     /// Do not report progress
     #[arg(short, long)]
     quiet: bool,
+    /// Verbose output: print errors (-v) or errors and paths (-vv)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Default)]
@@ -98,6 +101,7 @@ struct Config {
     no_atime: bool,  
     progress: Option<Arc<Progress>>,
     pid: u32,
+    verbose: u8,
 }
 
 fn main() -> Result<()> {
@@ -192,6 +196,10 @@ fn main() -> Result<()> {
     println!("Temp dir     : {}", out_dir.display());
     println!("Workers      : {}", workers);
 
+    if args.verbose > 0 {
+        println!("Verbose      : Level {}", args.verbose);
+    }
+
     // ---- work queue + inflight counter ----
     let (tx, rx) = unbounded::<Task>();
     let inflight = Arc::new(AtomicUsize::new(0));
@@ -274,6 +282,7 @@ fn main() -> Result<()> {
         no_atime: args.no_atime,
         progress: (!args.quiet).then(|| progress.clone()),
         pid,
+        verbose: args.verbose,
     };
 
     // ---- spawn workers ----
@@ -340,7 +349,7 @@ fn worker(
     let base = BufWriter::with_capacity(32 * 1024 * 1024, file);
     let has_progress = cfg.progress.is_some();  
     let progress = cfg.progress.unwrap_or_default();
-    
+    let verbose = cfg.verbose;
 
     // Choose writer: zstd encoder for binary; otherwise the base writer
     let mut writer: Box<dyn Write + Send> = if is_bin {
@@ -365,6 +374,11 @@ fn worker(
                     let _ = inflight.fetch_sub(1, Relaxed);
                     continue;
                 }
+
+                if verbose >= 2 {
+                    eprintln!("[{}] Processing directory: {}", tid, dir.display());
+                }
+
                 if let Some(row) = stat_row(&dir) {
                     if is_bin { 
                         write_row_bin(&mut buf, &dir, &row, cfg.no_atime); 
@@ -374,7 +388,10 @@ fn worker(
                     stats.files += 1;                    
                 } else {
                     stats.errors += 1; 
-                    error_count += 1;                   
+                    error_count += 1;
+                    if verbose >= 1 {
+                        eprintln!("[{}] ERROR: Failed to stat directory: {}", tid, dir.display());
+                    }
                 }
 
                 if buf.len() >= FLUSH_BYTES {
@@ -382,7 +399,7 @@ fn worker(
                     buf.clear();
                 }
 
-                error_count += enum_dir(&dir, &tx, &inflight, cfg.skip.as_deref());
+                error_count += enum_dir(&dir, &tx, &inflight, cfg.skip.as_deref(), verbose, tid);
                 stats.errors += error_count;
                 inflight.fetch_sub(1, Relaxed);   
                 if has_progress {
@@ -399,6 +416,11 @@ fn worker(
 
                 for FileItem { name, md } in &items {
                     let full = base.join(&name);
+                    
+                    if verbose >= 2 {
+                        eprintln!("[{}] Processing file: {}", tid, full.display());
+                    }
+
                     let row = row_from_metadata(&md);
                     if is_bin { 
                         write_row_bin(&mut buf, &full, &row, cfg.no_atime);
@@ -430,24 +452,44 @@ fn worker(
 }
 
 
-fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<&str>) -> u64 {
+fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<&str>, verbose: u8, tid: usize) -> u64 {
     let rd = match fs::read_dir(dir) {
         Ok(it) => it,
-        Err(_) => return 1,
+        Err(e) => {
+            if verbose >= 1 {
+                eprintln!("[{}] ERROR: Failed to read directory {}: {}", tid, dir.display(), e);
+            }
+            return 1;
+        }
     };
     let mut error_count: u64 = 0;
     let mut page: Vec<FileItem> = Vec::with_capacity(FILE_CHUNK);
     let base_arc = Arc::new(dir.to_path_buf());
 
     for dent in rd {
-        let dent = match dent { Ok(d) => d, Err(_) => { error_count += 1; continue; } };
+        let dent = match dent { 
+            Ok(d) => d, 
+            Err(e) => { 
+                error_count += 1;
+                if verbose >= 1 {
+                    eprintln!("[{}] ERROR: Failed to read directory entry in {}: {}", tid, dir.display(), e);
+                }
+                continue; 
+            } 
+        };
         let name = dent.file_name();
         if name == OsStr::new(".") || name == OsStr::new("..") { continue; }
 
         // One file_type() call
         let ft = match dent.file_type() {
             Ok(ft) => ft,
-            Err(_) => { error_count += 1; continue; }
+            Err(e) => { 
+                error_count += 1;
+                if verbose >= 1 {
+                    eprintln!("[{}] ERROR: Failed to get file type for {}: {}", tid, dent.path().display(), e);
+                }
+                continue; 
+            }
         };
 
         if ft.is_dir() {
@@ -462,12 +504,24 @@ fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<
             let md = if ft.is_symlink() {
                 match fs::symlink_metadata(dent.path()) {
                     Ok(m) => m,
-                    Err(_) => { error_count += 1; continue; }
+                    Err(e) => { 
+                        error_count += 1;
+                        if verbose >= 1 {
+                            eprintln!("[{}] ERROR: Failed to get symlink metadata for {}: {}", tid, dent.path().display(), e);
+                        }
+                        continue; 
+                    }
                 }
             } else {
                 match dent.metadata() {
                     Ok(m) => m,
-                    Err(_) => { error_count += 1; continue; }
+                    Err(e) => { 
+                        error_count += 1;
+                        if verbose >= 1 {
+                            eprintln!("[{}] ERROR: Failed to get metadata for {}: {}", tid, dent.path().display(), e);
+                        }
+                        continue; 
+                    }
                 }
             };
             
@@ -1243,7 +1297,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
         
         // Should have no errors for valid directory
         assert_eq!(error_count, 0);
@@ -1278,7 +1332,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, Some("skip_me"));
+        let error_count = enum_dir(test_dir, &tx, &inflight, Some("skip_me"), 0, 0);
         assert_eq!(error_count, 0);
         
         // Check tasks - should only have keep_me directory
@@ -1307,7 +1361,7 @@ mod tests {
         let (tx, _rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(nonexistent, &tx, &inflight, None);
+        let error_count = enum_dir(nonexistent, &tx, &inflight, None, 0, 0);
         assert_eq!(error_count, 1); // Should return 1 error for failed read_dir
     }
 
@@ -1324,7 +1378,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
         assert_eq!(error_count, 0);
         
         drop(tx);
@@ -1358,6 +1412,7 @@ mod tests {
             no_atime: true,
             progress: Some(progress.clone()),
             pid: 123,
+            verbose: 0,
         };
         
         let cloned = config.clone();
@@ -1435,7 +1490,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
         assert_eq!(error_count, 0);
         
         drop(tx);
@@ -1518,6 +1573,7 @@ mod tests {
             no_atime: true,
             files_hint: Some("1000".to_string()),
             quiet: false,
+            verbose: 0,
         };
         
         let debug_str = format!("{:?}", args);
@@ -1599,6 +1655,7 @@ mod tests {
             no_atime: false,
             progress: Some(progress.clone()),
             pid: 12345,
+            verbose: 0,
         };
         
         // Send a simple files task
@@ -1642,6 +1699,7 @@ mod tests {
             no_atime: true,
             progress: None,
             pid: 12345,
+            verbose: 0,
         };
         
         // Send a files task
@@ -1683,6 +1741,7 @@ mod tests {
             no_atime: false,
             progress: None,
             pid: 12345,
+            verbose: 0,
         };
         
         tx.send(Task::Dir(skip_dir)).unwrap();
@@ -1714,6 +1773,7 @@ mod tests {
             no_atime: false,
             progress: None,
             pid: 12345,
+            verbose: 0,
         };
         
         let metadata = fs::metadata(&test_file).unwrap();
@@ -1846,7 +1906,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
         assert_eq!(error_count, 0);
         
         drop(tx);
@@ -1908,6 +1968,7 @@ mod tests {
             no_atime: false,
             progress: None,
             pid: 1,
+            verbose: 0,
         };
         
         let cfg2 = cfg1.clone();
@@ -1937,7 +1998,7 @@ mod tests {
         let (tx, _rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(&test_dir, &tx, &inflight, None);
+        let error_count = enum_dir(&test_dir, &tx, &inflight, None, 0, 0);
         
         // Restore permissions for cleanup
         let mut perms = fs::metadata(&test_dir).unwrap().permissions();
@@ -1980,6 +2041,7 @@ mod tests {
             no_atime: false,
             progress: None,
             pid: 12345,
+            verbose: 0,
         };
         
         // Send a directory task for a path that will cause stat_row to fail
@@ -2064,6 +2126,7 @@ mod tests {
                 no_atime,
                 progress: Some(progress.clone()),
                 pid: 98765,
+                verbose: 0,
             };
             
             // Send files tasks instead of directory tasks to avoid hanging
