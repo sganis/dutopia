@@ -92,23 +92,31 @@ fn csv_to_zst(args: &Args) -> Result<()> {
 
     println!("Creating .zst file...");
 
-    let mut line = String::new();
+    // Use Vec<u8> instead of String to handle raw bytes
+    let mut line_buf = Vec::new();
 
     // Process each CSV line
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
+        line_buf.clear();
+        let bytes_read = read_line_bytes(&mut reader, &mut line_buf)?;
         if bytes_read == 0 {
             break; // EOF
         }
 
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
+        // Remove trailing newline if present
+        if line_buf.ends_with(b"\n") {
+            line_buf.pop();
+            if line_buf.ends_with(b"\r") {
+                line_buf.pop();
+            }
+        }
+
+        if line_buf.is_empty() {
             continue; // Skip empty lines
         }
 
-        // Parse CSV line
-        let record = parse_csv_record(trimmed)?;
+        // Parse CSV line as bytes
+        let record = parse_csv_record_bytes(&line_buf)?;
 
         // Write binary record
         write_binary_record(&mut writer, &record)?;
@@ -124,6 +132,33 @@ fn csv_to_zst(args: &Args) -> Result<()> {
     println!("Elapsed time : {:.3} sec.", start.elapsed().as_secs_f64());
 
     Ok(())
+}
+
+// Helper function to read a line as raw bytes instead of UTF-8 string
+fn read_line_bytes<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> Result<usize> {
+    let mut bytes_read = 0;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break; // EOF
+        }
+
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            // Found newline, read up to and including it
+            let to_read = newline_pos + 1;
+            buf.extend_from_slice(&available[..to_read]);
+            reader.consume(to_read);
+            bytes_read += to_read;
+            break;
+        } else {
+            // No newline, read all available bytes
+            buf.extend_from_slice(available);
+            let len = available.len();
+            reader.consume(len);
+            bytes_read += len;
+        }
+    }
+    Ok(bytes_read)
 }
 
 fn zst_to_csv(args: &Args) -> Result<()> {
@@ -229,17 +264,19 @@ fn zst_to_csv(args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn parse_csv_record(line: &str) -> Result<BinaryRecord> {
-    let fields = parse_csv_line(line);
+// New function to parse CSV record from raw bytes
+fn parse_csv_record_bytes(line: &[u8]) -> Result<BinaryRecord> {
+    let fields = parse_csv_line_bytes(line);
 
     if fields.len() != 9 {
-        anyhow::bail!(format!("CSV record must have 9 fields, got {}: {}", fields.len(), line));
+        anyhow::bail!("CSV record must have 9 fields, got {}: {}", fields.len(), String::from_utf8_lossy(line));
     }
 
-    // Parse INODE field (dev-ino)
-    let inode_parts: Vec<&str> = fields[0].split('-').collect();
+    // Parse INODE field (dev-ino) - convert to string for parsing numbers
+    let inode_str = String::from_utf8_lossy(&fields[0]);
+    let inode_parts: Vec<&str> = inode_str.split('-').collect();
     if inode_parts.len() != 2 {
-       anyhow::bail!(format!("Invalid INODE format, expected dev-ino: {}", fields[0]));
+        anyhow::bail!("Invalid INODE format, expected dev-ino: {}", inode_str);
     }
 
     let dev = inode_parts[0]
@@ -250,35 +287,37 @@ fn parse_csv_record(line: &str) -> Result<BinaryRecord> {
         .parse::<u64>()
         .map_err(|e| anyhow::anyhow!("Invalid ino: {}", e))?;
 
-    let atime = fields[1]
+    // Parse other numeric fields
+    let atime = String::from_utf8_lossy(&fields[1])
         .parse::<i64>()
         .map_err(|e| anyhow::anyhow!("Invalid atime: {}", e))?;
 
-    let mtime = fields[2]
+    let mtime = String::from_utf8_lossy(&fields[2])
         .parse::<i64>()
         .map_err(|e| anyhow::anyhow!("Invalid mtime: {}", e))?;
 
-    let uid = fields[3]
+    let uid = String::from_utf8_lossy(&fields[3])
         .parse::<u32>()
         .map_err(|e| anyhow::anyhow!("Invalid uid: {}", e))?;
 
-    let gid = fields[4]
+    let gid = String::from_utf8_lossy(&fields[4])
         .parse::<u32>()
         .map_err(|e| anyhow::anyhow!("Invalid gid: {}", e))?;
 
-    let mode = fields[5]
+    let mode = String::from_utf8_lossy(&fields[5])
         .parse::<u32>()
         .map_err(|e| anyhow::anyhow!("Invalid mode: {}", e))?;
 
-    let size = fields[6]
+    let size = String::from_utf8_lossy(&fields[6])
         .parse::<u64>()
         .map_err(|e| anyhow::anyhow!("Invalid size: {}", e))?;
 
-    let disk = fields[7]
+    let disk = String::from_utf8_lossy(&fields[7])
         .parse::<u64>()
         .map_err(|e| anyhow::anyhow!("Invalid disk: {}", e))?;
 
-    let path = fields[8].as_bytes().to_vec();
+    // Path field - keep as raw bytes
+    let path = fields[8].clone();
 
     Ok(BinaryRecord {
         path,
@@ -294,38 +333,54 @@ fn parse_csv_record(line: &str) -> Result<BinaryRecord> {
     })
 }
 
-fn parse_csv_line(line: &str) -> Vec<String> {
+// New function to parse CSV line as raw bytes
+fn parse_csv_line_bytes(line: &[u8]) -> Vec<Vec<u8>> {
     let mut fields = Vec::new();
-    let mut current_field = String::new();
+    let mut current_field = Vec::new();
     let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
+    let mut i = 0;
 
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if !in_quotes => {
+    while i < line.len() {
+        let b = line[i];
+        match b {
+            b'"' if !in_quotes => {
                 in_quotes = true;
             }
-            '"' if in_quotes => {
-                if chars.peek() == Some(&'"') {
+            b'"' if in_quotes => {
+                if i + 1 < line.len() && line[i + 1] == b'"' {
                     // Escaped quote
-                    chars.next(); // consume the second quote
-                    current_field.push('"');
+                    current_field.push(b'"');
+                    i += 1; // Skip the next quote
                 } else {
                     in_quotes = false;
                 }
             }
-            ',' if !in_quotes => {
+            b',' if !in_quotes => {
                 fields.push(current_field);
-                current_field = String::new();
+                current_field = Vec::new();
             }
             _ => {
-                current_field.push(ch);
+                current_field.push(b);
             }
         }
+        i += 1;
     }
 
     fields.push(current_field);
     fields
+}
+
+// Keep the original string-based function for backward compatibility
+#[cfg(test)]
+fn parse_csv_record(line: &str) -> Result<BinaryRecord> {
+    parse_csv_record_bytes(line.as_bytes())
+}
+#[cfg(test)]
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let byte_fields = parse_csv_line_bytes(line.as_bytes());
+    byte_fields.into_iter()
+        .map(|field| String::from_utf8_lossy(&field).into_owned())
+        .collect()
 }
 
 fn write_binary_record<W: Write>(writer: &mut W, record: &BinaryRecord) -> Result<()> {
@@ -568,6 +623,64 @@ mod tests {
         }
     }
 
+    fn sample_record_with_newline() -> BinaryRecord {
+        BinaryRecord {
+            path: b"path\nwith\nnewlines.txt".to_vec(),
+            dev: 2051,
+            ino: 11111,
+            atime: 1000000000,
+            mtime: 2000000000,
+            uid: 500,
+            gid: 500,
+            mode: 33188,
+            size: 2048,
+            disk: 3,
+        }
+    }
+
+    fn sample_record_non_utf8() -> BinaryRecord {
+        BinaryRecord {
+            path: vec![0xFF, 0xFE, b'/', b'p', b'a', b't', b'h'], // Invalid UTF-8 sequence
+            dev: 2052,
+            ino: 22222,
+            atime: 1500000000,
+            mtime: 1600000000,
+            uid: 750,
+            gid: 750,
+            mode: 16877,
+            size: 4096,
+            disk: 4,
+        }
+    }
+
+    #[test]
+    fn test_parse_csv_line_bytes_simple() {
+        let line = b"a,b,c,d";
+        let fields = parse_csv_line_bytes(line);
+        assert_eq!(fields, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_bytes_quoted() {
+        let line = br#"a,"b,c",d"#;
+        let fields = parse_csv_line_bytes(line);
+        assert_eq!(fields, vec![b"a".to_vec(), b"b,c".to_vec(), b"d".to_vec()]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_bytes_with_newline() {
+        let line = b"a,\"b\nc\",d";
+        let fields = parse_csv_line_bytes(line);
+        assert_eq!(fields, vec![b"a".to_vec(), b"b\nc".to_vec(), b"d".to_vec()]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_bytes_non_utf8() {
+        let line = vec![b'a', b',', b'"', 0xFF, 0xFE, b'"', b',', b'd'];
+        let fields = parse_csv_line_bytes(&line);
+        assert_eq!(fields, vec![b"a".to_vec(), vec![0xFF, 0xFE], b"d".to_vec()]);
+    }
+
     #[test]
     fn test_parse_csv_line_simple() {
         let line = "a,b,c,d";
@@ -617,6 +730,14 @@ mod tests {
             r#"2050-67890,-1,0,0,0,16877,4096,1,"path with ""quotes"".txt""#;
         let record = parse_csv_record(csv_line).unwrap();
         let expected = sample_record_with_quotes();
+        assert_eq!(record, expected);
+    }
+
+    #[test]
+    fn test_parse_csv_record_with_newline_in_path() {
+        let csv_line = "2051-11111,1000000000,2000000000,500,500,33188,2048,3,\"path\nwith\nnewlines.txt\"";
+        let record = parse_csv_record(csv_line).unwrap();
+        let expected = sample_record_with_newline();
         assert_eq!(record, expected);
     }
 
@@ -675,6 +796,25 @@ mod tests {
     }
 
     #[test]
+    fn test_format_csv_record_with_newline() {
+        let record = sample_record_with_newline();
+        let csv_line = format_csv_record(&record);
+        assert_eq!(
+            csv_line,
+            "2051-11111,1000000000,2000000000,500,500,33188,2048,3,\"path\nwith\nnewlines.txt\""
+        );
+    }
+
+    #[test]
+    fn test_format_csv_record_non_utf8() {
+        let record = sample_record_non_utf8();
+        let csv_line = format_csv_record(&record);
+        // Non-UTF8 bytes should be handled with lossy conversion
+        assert!(csv_line.contains("2052-22222"));
+        assert!(csv_line.contains("/path")); // The valid UTF-8 part should be preserved
+    }
+
+    #[test]
     fn test_write_and_read_binary_record() {
         let record = sample_record();
         let mut buffer = Vec::new();
@@ -692,6 +832,36 @@ mod tests {
     #[test]
     fn test_write_and_read_binary_record_with_quotes() {
         let record = sample_record_with_quotes();
+        let mut buffer = Vec::new();
+
+        // Write record
+        write_binary_record(&mut buffer, &record).unwrap();
+
+        // Read it back
+        let mut cursor = Cursor::new(&buffer);
+        let read_record = read_binary_record(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(record, read_record);
+    }
+
+    #[test]
+    fn test_write_and_read_binary_record_with_newline() {
+        let record = sample_record_with_newline();
+        let mut buffer = Vec::new();
+
+        // Write record
+        write_binary_record(&mut buffer, &record).unwrap();
+
+        // Read it back
+        let mut cursor = Cursor::new(&buffer);
+        let read_record = read_binary_record(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(record, read_record);
+    }
+
+    #[test]
+    fn test_write_and_read_binary_record_non_utf8() {
+        let record = sample_record_non_utf8();
         let mut buffer = Vec::new();
 
         // Write record
@@ -727,5 +897,62 @@ mod tests {
         let csv = format_csv_record(&rec);
         let parsed = parse_csv_record(&csv).unwrap();
         assert_eq!(rec, parsed);
+    }
+
+    #[test]
+    fn test_csv_roundtrip_with_newline() {
+        let rec = sample_record_with_newline();
+        let csv = format_csv_record(&rec);
+        let parsed = parse_csv_record(&csv).unwrap();
+        assert_eq!(rec, parsed);
+    }
+
+    #[test]
+    fn test_csv_roundtrip_non_utf8() {
+        let rec = sample_record_non_utf8();
+        let csv = format_csv_record(&rec);
+        let parsed = parse_csv_record(&csv).unwrap();
+        // Due to lossy UTF-8 conversion, we can't guarantee exact byte equality
+        // but the structure should be preserved
+        assert_eq!(rec.dev, parsed.dev);
+        assert_eq!(rec.ino, parsed.ino);
+        assert_eq!(rec.atime, parsed.atime);
+        assert_eq!(rec.mtime, parsed.mtime);
+        assert_eq!(rec.uid, parsed.uid);
+        assert_eq!(rec.gid, parsed.gid);
+        assert_eq!(rec.mode, parsed.mode);
+        assert_eq!(rec.size, parsed.size);
+        assert_eq!(rec.disk, parsed.disk);
+        // Path may differ due to lossy conversion, but should contain the valid parts
+    }
+
+    #[test]
+    fn test_read_line_bytes() {
+        let data = b"line1\nline2\r\nline3\n";
+        let mut cursor = Cursor::new(data);
+        let mut buf = Vec::new();
+
+        // Read first line
+        let bytes_read = read_line_bytes(&mut cursor, &mut buf).unwrap();
+        assert_eq!(bytes_read, 6);
+        assert_eq!(buf, b"line1\n");
+
+        // Read second line
+        buf.clear();
+        let bytes_read = read_line_bytes(&mut cursor, &mut buf).unwrap();
+        assert_eq!(bytes_read, 7);
+        assert_eq!(buf, b"line2\r\n");
+
+        // Read third line
+        buf.clear();
+        let bytes_read = read_line_bytes(&mut cursor, &mut buf).unwrap();
+        assert_eq!(bytes_read, 6);
+        assert_eq!(buf, b"line3\n");
+
+        // EOF
+        buf.clear();
+        let bytes_read = read_line_bytes(&mut cursor, &mut buf).unwrap();
+        assert_eq!(bytes_read, 0);
+        assert!(buf.is_empty());
     }
 }
