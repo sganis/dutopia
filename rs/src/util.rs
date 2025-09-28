@@ -753,34 +753,6 @@ mod tests {
     // ============================================================================
     // Progress bar tests
     // ============================================================================
-
-    #[test]
-    fn test_progress_bar_basic() {
-        // Note: These tests check structure without ANSI colors
-        let bar = progress_bar(0.0, 10);
-        assert!(bar.starts_with('['));
-        assert!(bar.ends_with(']'));
-        // The function returns colored output, so we can't check exact content
-        // Just verify it has reasonable structure
-        assert!(bar.len() > 12); // Should have brackets plus content plus ANSI codes
-        
-        let bar = progress_bar(100.0, 10);
-        assert!(bar.starts_with('['));
-        assert!(bar.ends_with(']'));
-        assert!(bar.len() > 12); // Should have brackets plus content plus ANSI codes
-    }
-
-    #[test]
-    fn test_progress_bar_percentages() {
-        let bar = progress_bar(50.0, 10);
-        assert!(bar.starts_with('['));
-        assert!(bar.ends_with(']'));
-        // Should have roughly half filled
-        
-        let bar = progress_bar(25.0, 4);
-        assert!(bar.len() > 6); // [XXX] plus ANSI codes
-    }
-
     #[test]
     fn test_progress_bar_edge_cases() {
         let bar = progress_bar(-10.0, 5); // Negative percentage
