@@ -376,7 +376,7 @@ fn worker(
                 }
 
                 if verbose >= 2 {
-                    eprintln!("[{}] Processing directory: {}", tid, dir.display());
+                    eprintln!("[{:>2}] Processing {}", tid, dir.display());
                 }
 
                 if let Some(row) = stat_row(&dir) {
@@ -390,7 +390,7 @@ fn worker(
                     stats.errors += 1; 
                     error_count += 1;
                     if verbose >= 1 {
-                        eprintln!("[{}] ERROR: Failed to stat directory: {}", tid, dir.display());
+                        eprintln!("ERROR: Failed to stat directory: {}", dir.display());
                     }
                 }
 
@@ -399,7 +399,7 @@ fn worker(
                     buf.clear();
                 }
 
-                error_count += enum_dir(&dir, &tx, &inflight, cfg.skip.as_deref(), verbose, tid);
+                error_count += enum_dir(&dir, &tx, &inflight, cfg.skip.as_deref(), verbose);
                 stats.errors += error_count;
                 inflight.fetch_sub(1, Relaxed);   
                 if has_progress {
@@ -418,7 +418,7 @@ fn worker(
                     let full = base.join(&name);
                     
                     if verbose >= 2 {
-                        eprintln!("[{}] Processing file: {}", tid, full.display());
+                        eprintln!("[{:>2}] Processing {}", tid, full.display());
                     }
 
                     let row = row_from_metadata(&md);
@@ -428,7 +428,7 @@ fn worker(
                         write_row_csv(&mut buf, &full, &row, cfg.no_atime);
                     }
                     stats.files += 1;
-                    stats.bytes += &row.size;
+                    stats.bytes += &row.blocks * 512;
                     files += 1;
                     if buf.len() >= FLUSH_BYTES {
                         let _ = writer.write_all(&buf);
@@ -452,12 +452,12 @@ fn worker(
 }
 
 
-fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<&str>, verbose: u8, tid: usize) -> u64 {
+fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<&str>, verbose: u8) -> u64 {
     let rd = match fs::read_dir(dir) {
         Ok(it) => it,
         Err(e) => {
             if verbose >= 1 {
-                eprintln!("[{}] ERROR: Failed to read directory {}: {}", tid, dir.display(), e);
+                eprintln!("ERROR: {}: {}", dir.display(), e);
             }
             return 1;
         }
@@ -472,7 +472,7 @@ fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<
             Err(e) => { 
                 error_count += 1;
                 if verbose >= 1 {
-                    eprintln!("[{}] ERROR: Failed to read directory entry in {}: {}", tid, dir.display(), e);
+                    eprintln!("ERROR: entry in {}: {}", dir.display(), e);
                 }
                 continue; 
             } 
@@ -486,7 +486,7 @@ fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<
             Err(e) => { 
                 error_count += 1;
                 if verbose >= 1 {
-                    eprintln!("[{}] ERROR: Failed to get file type for {}: {}", tid, dent.path().display(), e);
+                    eprintln!("ERROR: {}: {}", dent.path().display(), e);
                 }
                 continue; 
             }
@@ -507,7 +507,7 @@ fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<
                     Err(e) => { 
                         error_count += 1;
                         if verbose >= 1 {
-                            eprintln!("[{}] ERROR: Failed to get symlink metadata for {}: {}", tid, dent.path().display(), e);
+                            eprintln!("ERROR: {}: {}", dent.path().display(), e);
                         }
                         continue; 
                     }
@@ -518,7 +518,7 @@ fn enum_dir(dir: &Path, tx: &Sender<Task>, inflight: &AtomicUsize, skip: Option<
                     Err(e) => { 
                         error_count += 1;
                         if verbose >= 1 {
-                            eprintln!("[{}] ERROR: Failed to get metadata for {}: {}", tid, dent.path().display(), e);
+                            eprintln!("ERROR: {}: {}", dent.path().display(), e);
                         }
                         continue; 
                     }
@@ -1297,7 +1297,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0);
         
         // Should have no errors for valid directory
         assert_eq!(error_count, 0);
@@ -1332,7 +1332,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, Some("skip_me"), 0, 0);
+        let error_count = enum_dir(test_dir, &tx, &inflight, Some("skip_me"), 0);
         assert_eq!(error_count, 0);
         
         // Check tasks - should only have keep_me directory
@@ -1361,7 +1361,7 @@ mod tests {
         let (tx, _rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(nonexistent, &tx, &inflight, None, 0, 0);
+        let error_count = enum_dir(nonexistent, &tx, &inflight, None, 0);
         assert_eq!(error_count, 1); // Should return 1 error for failed read_dir
     }
 
@@ -1378,7 +1378,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0);
         assert_eq!(error_count, 0);
         
         drop(tx);
@@ -1490,7 +1490,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0);
         assert_eq!(error_count, 0);
         
         drop(tx);
@@ -1906,7 +1906,7 @@ mod tests {
         let (tx, rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0, 0);
+        let error_count = enum_dir(test_dir, &tx, &inflight, None, 0);
         assert_eq!(error_count, 0);
         
         drop(tx);
@@ -1998,7 +1998,7 @@ mod tests {
         let (tx, _rx) = unbounded();
         let inflight = Arc::new(AtomicUsize::new(0));
         
-        let error_count = enum_dir(&test_dir, &tx, &inflight, None, 0, 0);
+        let error_count = enum_dir(&test_dir, &tx, &inflight, None, 0);
         
         // Restore permissions for cleanup
         let mut perms = fs::metadata(&test_dir).unwrap().permissions();
