@@ -401,18 +401,18 @@
       case "size":
         return humanBytes(toNum(folder?.total_size));
       case "count":
-        return `${humanCount(toNum(folder?.total_count))} Files`;
+        return `Files: ${humanCount(toNum(folder?.total_count))}`;
     }
   }
   
   function bottomValueFolder(folder: FolderItem) {
     switch (sortBy) {
       case "disk":
-        return `${humanCount(toNum(folder?.total_count))} Files • ${humanCount(toNum(folder?.total_linked))} Linked`;
+        return `${humanCount(toNum(folder?.total_count))} Files • Linked: ${humanBytes(toNum(folder?.total_linked))}`;
       case "size":
-        return `${humanCount(toNum(folder?.total_count))} Files • ${humanCount(toNum(folder?.total_disk))} On disk`;
+        return `${humanCount(toNum(folder?.total_count))} Files • Linked: ${humanBytes(toNum(folder?.total_linked))}`;
       case "count":
-        return humanBytes(toNum(folder?.total_disk));
+        return `Disk: ${humanBytes(toNum(folder?.total_disk))} • Linked: ${humanBytes(toNum(folder?.total_linked))}`;
     }
   }
   
