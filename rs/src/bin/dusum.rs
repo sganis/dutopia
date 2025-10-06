@@ -76,15 +76,19 @@ impl AgeCfg {
 #[derive(Default, Clone, Debug, PartialEq)]
 struct UserStats {
     file_count: u64,
-    disk_usage: u64,    // integer bytes
-    latest_atime: i64,  // seconds since Unix epoch
-    latest_mtime: i64,  // seconds since Unix epoch
+    file_size: u64,    // integer bytes
+    disk_size: u64,    // integer bytes
+    linked_size: u64,  // integer bytes
+    latest_atime: i64, // seconds since Unix epoch
+    latest_mtime: i64, // seconds since Unix epoch
 }
 
 impl UserStats {
-    fn update(&mut self, disk: u64, atime_secs: i64, mtime_secs: i64) {
+    fn update(&mut self, size: u64, disk: u64, linked: u64, atime_secs: i64, mtime_secs: i64) {
         self.file_count = self.file_count.saturating_add(1);
-        self.disk_usage = self.disk_usage.saturating_add(disk);
+        self.file_size = self.file_size.saturating_add(size);
+        self.disk_size = self.disk_size.saturating_add(disk);
+        self.linked_size = self.linked_size.saturating_add(linked);
         if atime_secs > self.latest_atime {
             self.latest_atime = atime_secs;
         }
@@ -148,6 +152,8 @@ fn main() -> Result<()> {
 
     let now_ts = Utc::now().timestamp();
 
+    let mut seen_inodes: HashSet<Vec<u8>> = HashSet::new();
+
     // Process each record
     for (index, record_result) in reader.byte_records().enumerate() {
         let record = match record_result {
@@ -159,20 +165,27 @@ fn main() -> Result<()> {
         };
 
         // Columns: INODE,ATIME,MTIME,UID,GID,MODE,SIZE,DISK,PATH
+        let inode_bytes = record.get(0).unwrap_or(b"").to_vec();
         let mode      = parse_int::<u32>(record.get(5));
         let is_dir    = (mode & S_IFMT) == S_IFDIR;
         let raw_atime = parse_int::<i64>(record.get(1));
         let raw_mtime = parse_int::<i64>(record.get(2));
         let sanitized_atime = if is_dir { 0 } else { sanitize_mtime(now_ts, raw_atime) };
         let sanitized_mtime = sanitize_mtime(now_ts, raw_mtime);
-
         let uid = parse_int::<u32>(record.get(3));
         let user = resolve_user(uid, &mut user_cache);
         if user == "UNK" {
             unk_uids.insert(uid);
         }
+        let file_size = parse_int::<u64>(record.get(6));
+        let raw_disk = parse_int::<u64>(record.get(7));
+        // Only count disk usage if this is the first time seeing this inode
+        let (disk_size, linked_size) = if seen_inodes.insert(inode_bytes) {
+            (raw_disk, 0)  // First time - count disk, no linked savings
+        } else {
+            (0, raw_disk)  // Already seen - don't count disk, but track as linked
+        };
 
-        let disk_usage = parse_int::<u64>(record.get(7));
         let path_bytes = record.get(8).unwrap_or(b"");
 
         if user.is_empty() || path_bytes.is_empty() {
@@ -187,7 +200,7 @@ fn main() -> Result<()> {
             aggregated_data
                 .entry(key)
                 .or_default()
-                .update(disk_usage, sanitized_atime, sanitized_mtime);
+                .update(file_size, disk_size, linked_size, sanitized_atime, sanitized_mtime);
         }
 
         // Show progress (approx 10% steps)
@@ -336,7 +349,9 @@ fn write_results(
         "user",
         "age",
         "files",
+        "size",
         "disk",
+        "linked",
         "accessed",
         "modified",
     ])?;
@@ -349,7 +364,9 @@ fn write_results(
             user,
             &age.to_string(),
             &stats.file_count.to_string(),
-            &stats.disk_usage.to_string(),
+            &stats.file_size.to_string(),
+            &stats.disk_size.to_string(),
+            &stats.linked_size.to_string(),
             &stats.latest_atime.to_string(),
             &stats.latest_mtime.to_string(),
         ])?;
@@ -415,6 +432,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    // ---------- Basic utility tests ----------
 
     #[test]
     fn bytes_to_safe_string_handles_invalid_utf8() {
@@ -422,6 +440,16 @@ mod tests {
         let s = bytes_to_safe_string(&bad);
         assert!(s.contains('�'));
         assert!(s.contains('a') && s.contains('b'));
+    }
+
+    #[test]
+    fn bytes_to_safe_string_always_utf8() {
+        // invalid bytes should produce replacement chars but valid UTF-8 string overall
+        let raw = [b'/', 0xFFu8, b'a', b'/', 0xFE, b'b'];
+        let s = bytes_to_safe_string(&raw);
+        assert!(s.is_char_boundary(s.len())); // well-formed UTF-8
+        assert!(s.contains('�'));
+        assert!(s.contains("/"));
     }
 
     #[test]
@@ -435,37 +463,7 @@ mod tests {
         assert_eq!(parse_int::<u32>(None), 0);
     }
 
-    #[test]
-    fn ancestors_from_non_utf8_bytes() {
-        // Include invalid UTF-8 byte 0xFF and nested segments
-        let raw = [b'/', 0xFFu8, b'a', b'/', b'b', b'/', b'c', b'/', b'f', b'.', b't', b'x', b't'];
-        let ancestors = get_folder_ancestors(&raw);
-        // still builds byte paths; no panics
-        assert_eq!(ancestors[0], b"/".to_vec());
-        assert!(ancestors.contains(&vec![b'/', 0xFFu8, b'a']));
-        assert!(ancestors.contains(&vec![b'/', 0xFFu8, b'a', b'/', b'b']));
-    }
-
-    #[test]
-    fn write_results_emits_utf8_paths() {
-        let mut map: HashMap<(Vec<u8>, String, u8), UserStats> = HashMap::new();
-        let key = (vec![b'/', 0xFFu8, b'a'], "user".to_string(), 0u8);
-        let mut s = UserStats::default();
-        s.update(512, 1_700_000_000, 1_700_000_000);
-        map.insert(key, s);
-
-        let tmp = std::env::temp_dir().join(format!("sum_out_{}.csv", std::process::id()));
-        let _ = fs::remove_file(&tmp);
-        write_results(&tmp, &map).unwrap();
-
-        let contents = fs::read_to_string(&tmp).unwrap(); // must be valid UTF-8
-        fs::remove_file(&tmp).ok();
-
-        // Should contain replacement char for 0xFF and the rest intact
-        assert!(contents.contains('�'));
-        assert!(contents.contains("/a") || contents.contains("/�a"));
-        assert!(contents.lines().next().unwrap().contains("path,user,age,files,disk,accessed,modified"));
-    }
+    // ---------- Count lines tests ----------
 
     #[test]
     fn count_lines_empty() {
@@ -487,55 +485,110 @@ mod tests {
         assert_eq!(count_lines(f.path()).unwrap(), 3);
     }
 
-    // ---------- write_results ordering ----------
+    // ---------- UserStats tests ----------
 
     #[test]
-    fn write_results_is_sorted_by_path_user_age() {
-        let mut map: HashMap<(Vec<u8>, String, u8), UserStats> = HashMap::new();
-
-        // Insert in scrambled order
-        map.insert((b"/a/b".to_vec(), "user2".to_string(), 1), UserStats { file_count: 2, disk_usage: 200, latest_atime: 20, latest_mtime: 20 });
-        map.insert((b"/a".to_vec(),   "user1".to_string(), 0), UserStats { file_count: 1, disk_usage: 100, latest_atime: 20, latest_mtime: 10 });
-        map.insert((b"/a".to_vec(),   "user0".to_string(), 2), UserStats { file_count: 3, disk_usage: 300, latest_atime: 20, latest_mtime: 30 });
-
-        let tmp = NamedTempFile::new().unwrap();
-        write_results(tmp.path(), &map).unwrap();
-
-        let contents = fs::read_to_string(tmp.path()).unwrap();
-        let mut lines = contents.lines();
-        // header
-        assert_eq!(lines.next().unwrap(), "path,user,age,files,disk,accessed,modified");
-
-        // Expected order: path (/a, /a, /a/b), then user (user0, user1), then age
-        let row1 = lines.next().unwrap().to_string();
-        let row2 = lines.next().unwrap().to_string();
-        let row3 = lines.next().unwrap().to_string();
-
-        assert!(row1.starts_with("/a,user0,2,"), "got: {row1}");
-        assert!(row2.starts_with("/a,user1,0,"), "got: {row2}");
-        assert!(row3.starts_with("/a/b,user2,1,"), "got: {row3}");
-
-        // nothing else
-        assert!(lines.next().is_none());
+    fn userstats_update_accumulates_correctly() {
+        let mut stats = UserStats::default();
+        stats.update(100, 100, 0, 1000, 2000);
+        stats.update(200, 0, 200, 3000, 4000);
+        
+        assert_eq!(stats.file_count, 2);
+        assert_eq!(stats.file_size, 300);
+        assert_eq!(stats.disk_size, 100);  // Only first file counted
+        assert_eq!(stats.linked_size, 200);  // Second file was hard link
+        assert_eq!(stats.latest_atime, 3000);
+        assert_eq!(stats.latest_mtime, 4000);
     }
-
-    // ---------- write_unknown_uids ordering ----------
 
     #[test]
-    fn write_unknown_uids_is_sorted() {
-        let tmp = NamedTempFile::new().unwrap();
-        let mut set = std::collections::HashSet::new();
-        set.insert(42);
-        set.insert(7);
-        set.insert(1000);
-
-        write_unknown_uids(tmp.path(), &set).unwrap();
-        let s = fs::read_to_string(tmp.path()).unwrap();
-        let lines: Vec<&str> = s.lines().collect();
-        assert_eq!(lines, vec!["7", "42", "1000"]);
+    fn userstats_update_keeps_latest_times() {
+        let mut stats = UserStats::default();
+        stats.update(100, 100, 0, 5000, 6000);
+        stats.update(200, 200, 0, 3000, 8000);  // older atime, newer mtime
+        stats.update(300, 300, 0, 7000, 4000);  // newer atime, older mtime
+        
+        assert_eq!(stats.latest_atime, 7000);  // keeps newest atime
+        assert_eq!(stats.latest_mtime, 8000);  // keeps newest mtime
     }
 
-    // ---------- get_folder_ancestors edge cases ----------
+    // ---------- Age bucket tests ----------
+
+    #[test]
+    fn age_bucket_categorizes_correctly() {
+        let cfg = AgeCfg { young: 60, old: 600 };
+        let now = 1_000_000_000;
+        
+        // Recent: < 60 days
+        assert_eq!(age_bucket(now, now - 30 * 86_400, cfg), 0);
+        assert_eq!(age_bucket(now, now - 59 * 86_400, cfg), 0);
+        
+        // Not too old: >= 60 and < 600 days
+        assert_eq!(age_bucket(now, now - 60 * 86_400, cfg), 1);
+        assert_eq!(age_bucket(now, now - 100 * 86_400, cfg), 1);
+        assert_eq!(age_bucket(now, now - 599 * 86_400, cfg), 1);
+        
+        // Old: >= 600 days
+        assert_eq!(age_bucket(now, now - 600 * 86_400, cfg), 2);
+        assert_eq!(age_bucket(now, now - 700 * 86_400, cfg), 2);
+        
+        // Invalid timestamp
+        assert_eq!(age_bucket(now, 0, cfg), 2);
+        assert_eq!(age_bucket(now, -1, cfg), 2);
+    }
+
+    #[test]
+    fn age_bucket_boundary_conditions() {
+        let cfg = AgeCfg { young: 60, old: 600 };
+        let now = 1_000_000_000;
+        
+        // Exact boundary at young threshold
+        assert_eq!(age_bucket(now, now - 60 * 86_400, cfg), 1);
+        
+        // One second before young threshold
+        assert_eq!(age_bucket(now, now - 60 * 86_400 + 1, cfg), 0);
+        
+        // Exact boundary at old threshold
+        assert_eq!(age_bucket(now, now - 600 * 86_400, cfg), 2);
+        
+        // One second before old threshold
+        assert_eq!(age_bucket(now, now - 600 * 86_400 + 1, cfg), 1);
+    }
+
+    // ---------- Sanitize mtime tests ----------
+
+    #[test]
+    fn sanitize_mtime_handles_future_dates() {
+        let now = 1_000_000_000;
+        
+        // Normal past date - unchanged
+        assert_eq!(sanitize_mtime(now, now - 1000), now - 1000);
+        
+        // Slightly in future (within 1 day) - unchanged
+        assert_eq!(sanitize_mtime(now, now + 3600), now + 3600);
+        assert_eq!(sanitize_mtime(now, now + 86_399), now + 86_399);
+        
+        // Exactly 1 day in future - unchanged
+        assert_eq!(sanitize_mtime(now, now + 86_400), now + 86_400);
+        
+        // More than 1 day in future - set to 0
+        assert_eq!(sanitize_mtime(now, now + 86_401), 0);
+        assert_eq!(sanitize_mtime(now, now + 2 * 86_400), 0);
+        assert_eq!(sanitize_mtime(now, now + 365 * 86_400), 0);
+    }
+
+    // ---------- Folder ancestors tests ----------
+
+    #[test]
+    fn ancestors_from_non_utf8_bytes() {
+        // Include invalid UTF-8 byte 0xFF and nested segments
+        let raw = [b'/', 0xFFu8, b'a', b'/', b'b', b'/', b'c', b'/', b'f', b'.', b't', b'x', b't'];
+        let ancestors = get_folder_ancestors(&raw);
+        // still builds byte paths; no panics
+        assert_eq!(ancestors[0], b"/".to_vec());
+        assert!(ancestors.contains(&vec![b'/', 0xFFu8, b'a']));
+        assert!(ancestors.contains(&vec![b'/', 0xFFu8, b'a', b'/', b'b']));
+    }
 
     #[test]
     fn ancestors_trailing_slashes_and_multi_seps() {
@@ -566,15 +619,180 @@ mod tests {
         );
     }
 
-    // ---------- PATH lossy UTF-8 conversion stays UTF-8 ----------
+    #[test]
+    fn ancestors_handles_root_only() {
+        assert_eq!(get_folder_ancestors(b"/file.txt"), vec![b"/".to_vec()]);
+        assert_eq!(get_folder_ancestors(b"/"), vec![b"/".to_vec()]);
+    }
 
     #[test]
-    fn bytes_to_safe_string_always_utf8() {
-        // invalid bytes should produce replacement chars but valid UTF-8 string overall
-        let raw = [b'/', 0xFFu8, b'a', b'/', 0xFE, b'b'];
-        let s = bytes_to_safe_string(&raw);
-        assert!(s.is_char_boundary(s.len())); // well-formed UTF-8
-        assert!(s.contains('�'));
-        assert!(s.contains("/"));
+    fn ancestors_handles_relative_paths() {
+        let res = get_folder_ancestors(b"file.txt");
+        assert_eq!(res, vec![b"/".to_vec()]);
+    }
+
+    #[test]
+    fn ancestors_simple_nested_path() {
+        let res = get_folder_ancestors(b"/a/b/c/file.txt");
+        assert_eq!(
+            res,
+            vec![
+                b"/".to_vec(),
+                b"/a".to_vec(),
+                b"/a/b".to_vec(),
+                b"/a/b/c".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn ancestors_single_level_path() {
+        let res = get_folder_ancestors(b"/a/file.txt");
+        assert_eq!(
+            res,
+            vec![
+                b"/".to_vec(),
+                b"/a".to_vec()
+            ]
+        );
+    }
+
+    // ---------- Write results tests ----------
+
+    #[test]
+    fn write_results_emits_utf8_paths() {
+        let mut map: HashMap<(Vec<u8>, String, u8), UserStats> = HashMap::new();
+        let key = (vec![b'/', 0xFFu8, b'a'], "user".to_string(), 0u8);
+        let mut s = UserStats::default();
+        s.update(512, 512, 0, 1_700_000_000, 1_700_000_000);
+        map.insert(key, s);
+
+        let tmp = std::env::temp_dir().join(format!("sum_out_{}.csv", std::process::id()));
+        let _ = fs::remove_file(&tmp);
+        write_results(&tmp, &map).unwrap();
+
+        let contents = fs::read_to_string(&tmp).unwrap(); // must be valid UTF-8
+        fs::remove_file(&tmp).ok();
+
+        // Should contain replacement char for 0xFF and the rest intact
+        assert!(contents.contains('�'));
+        assert!(contents.contains("/a") || contents.contains("/�a"));
+        assert!(contents.lines().next().unwrap().contains("path,user,age,files,size,disk,linked,accessed,modified"));
+    }
+
+    #[test]
+    fn write_results_is_sorted_by_path_user_age() {
+        let mut map: HashMap<(Vec<u8>, String, u8), UserStats> = HashMap::new();
+
+        // Insert in scrambled order
+        map.insert(
+            (b"/a/b".to_vec(), "user2".to_string(), 1),
+            UserStats { file_count: 2, file_size: 200, disk_size: 200, linked_size: 0, latest_atime: 20, latest_mtime: 20 }
+        );
+        map.insert(
+            (b"/a".to_vec(), "user1".to_string(), 0),
+            UserStats { file_count: 1, file_size: 100, disk_size: 100, linked_size: 0, latest_atime: 20, latest_mtime: 10 }
+        );
+        map.insert(
+            (b"/a".to_vec(), "user0".to_string(), 2),
+            UserStats { file_count: 3, file_size: 300, disk_size: 300, linked_size: 0, latest_atime: 20, latest_mtime: 30 }
+        );
+
+        let tmp = NamedTempFile::new().unwrap();
+        write_results(tmp.path(), &map).unwrap();
+
+        let contents = fs::read_to_string(tmp.path()).unwrap();
+        let mut lines = contents.lines();
+        // header
+        assert_eq!(lines.next().unwrap(), "path,user,age,files,size,disk,linked,accessed,modified");
+
+        // Expected order: path (/a, /a, /a/b), then user (user0, user1), then age
+        let row1 = lines.next().unwrap().to_string();
+        let row2 = lines.next().unwrap().to_string();
+        let row3 = lines.next().unwrap().to_string();
+
+        assert!(row1.starts_with("/a,user0,2,"), "got: {row1}");
+        assert!(row2.starts_with("/a,user1,0,"), "got: {row2}");
+        assert!(row3.starts_with("/a/b,user2,1,"), "got: {row3}");
+
+        // nothing else
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn write_results_includes_all_fields() {
+        let mut map: HashMap<(Vec<u8>, String, u8), UserStats> = HashMap::new();
+        map.insert(
+            (b"/test".to_vec(), "testuser".to_string(), 1),
+            UserStats {
+                file_count: 5,
+                file_size: 1000,
+                disk_size: 800,
+                linked_size: 200,
+                latest_atime: 1234567890,
+                latest_mtime: 1234567900,
+            }
+        );
+
+        let tmp = NamedTempFile::new().unwrap();
+        write_results(tmp.path(), &map).unwrap();
+
+        let contents = fs::read_to_string(tmp.path()).unwrap();
+        let mut lines = contents.lines();
+        lines.next(); // skip header
+
+        let data_line = lines.next().unwrap();
+        assert_eq!(data_line, "/test,testuser,1,5,1000,800,200,1234567890,1234567900");
+    }
+
+    // ---------- Write unknown UIDs tests ----------
+
+    #[test]
+    fn write_unknown_uids_is_sorted() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut set = std::collections::HashSet::new();
+        set.insert(42);
+        set.insert(7);
+        set.insert(1000);
+
+        write_unknown_uids(tmp.path(), &set).unwrap();
+        let s = fs::read_to_string(tmp.path()).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines, vec!["7", "42", "1000"]);
+    }
+
+    #[test]
+    fn write_unknown_uids_empty_set() {
+        let tmp = NamedTempFile::new().unwrap();
+        let set = std::collections::HashSet::new();
+
+        write_unknown_uids(tmp.path(), &set).unwrap();
+        let s = fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(s, "");
+    }
+
+    // ---------- AgeCfg tests ----------
+
+    #[test]
+    fn age_cfg_default_values() {
+        let cfg = AgeCfg::default();
+        assert_eq!(cfg.young, 60);
+        assert_eq!(cfg.old, 600);
+    }
+
+    #[test]
+    fn age_cfg_from_args_uses_provided_values() {
+        let args = Some((30, 365));
+        let cfg = AgeCfg::from_args(&args);
+        assert_eq!(cfg.young, 30);
+        assert_eq!(cfg.old, 365);
+    }
+
+    #[test]
+    fn age_cfg_from_args_uses_defaults_when_none() {
+        let cfg = AgeCfg::from_args(&None);
+        assert_eq!(cfg.young, 60);
+        assert_eq!(cfg.old, 600);
     }
 }
+
