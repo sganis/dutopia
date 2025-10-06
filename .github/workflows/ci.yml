@@ -47,9 +47,13 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Remove package-lock.json (browser/)
+        working-directory: browser
+        run: rm -f package-lock.json
+
       - name: Install deps (browser/)
         working-directory: browser
-        run: npm i
+        run: npm install
 
       - name: Build Svelte (browser/)
         working-directory: browser
