@@ -260,19 +260,30 @@ fn main() -> Result<()> {
         inflight.fetch_add(1, Relaxed);
         tx.send(Task::Dir(root)).expect("enqueue root");
     }
-
-    // shutdown notifier
+    
+    // shutdown detection with stronger memory ordering and double-check
     {
         let tx = tx.clone();
         let inflight = inflight.clone();
-        thread::spawn(move || loop {
-            if inflight.load(Relaxed) == 0 {
-                for _ in 0..workers {
-                    let _ = tx.send(Task::Shutdown);
-                }
-                break;
+        thread::spawn(move || {
+            let mut consecutive_zeros = 0;
+            loop {
+                let current_inflight = inflight.load(std::sync::atomic::Ordering::SeqCst);                
+                if current_inflight == 0 {
+                    consecutive_zeros += 1;
+                    // Wait for 5 consecutive checks (500ms total) to confirm work is done
+                    if consecutive_zeros >= 5 {
+                        // Send shutdown signals
+                        for _ in 0..workers {
+                            let _ = tx.send(Task::Shutdown);
+                        }
+                        break;
+                    }
+                } else {
+                    consecutive_zeros = 0;
+                }                
+                thread::sleep(std::time::Duration::from_millis(100));
             }
-            thread::sleep(std::time::Duration::from_millis(10));
         });
     }
 
