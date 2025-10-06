@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
 use csv::ReaderBuilder;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,6 +47,12 @@ struct Args {
     /// Port number (defaults to PORT env var or 8080)
     #[arg(short, long, env="PORT")]
     port: Option<u16>,
+    /// Enable HTTPS with certificate file path
+    #[arg(long, value_name="FILE", env="TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+    /// Private key file path (required if tls-cert is set)
+    #[arg(long, value_name="FILE", env="TLS_KEY")]
+    tls_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,8 +149,45 @@ async fn main() -> Result<()> {
     // Bind
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
-    println!("Serving on http://{addr}  (static dir: {static_dir})");
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+    // Check for HTTPS configuration
+    match (args.tls_cert, args.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            // HTTPS mode
+            if !cert_path.exists() {
+                eprintln!("{}", format!("Error: Certificate file not found: {}", cert_path.display()).red());
+                std::process::exit(1);
+            }
+            if !key_path.exists() {
+                eprintln!("{}", format!("Error: Key file not found: {}", key_path.display()).red());
+                std::process::exit(1);
+            }
+
+            println!("Loading TLS certificate from {} and key from {}", 
+                     cert_path.display(), key_path.display());
+            
+            let config = RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .context("Failed to load TLS certificate/key")?;
+
+            println!("Serving on https://{addr}  (static dir: {static_dir})");
+            axum_server::bind_rustls(addr, config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        (None, None) => {
+            // HTTP mode (existing behavior)
+            println!("Serving on http://{addr}  (static dir: {static_dir})");
+            axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+        }
+        _ => {
+            eprintln!("{}", "Error: Both --tls-cert and --tls-key must be provided together".red());
+            std::process::exit(1);
+        }
+    }
+    
+
+    //println!("Serving on http://{addr}  (static dir: {static_dir})");
+    //axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
     Ok(())
 }
 
