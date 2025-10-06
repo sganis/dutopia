@@ -10,7 +10,6 @@
   import ColorPicker from 'svelte-awesome-color-picker';
   import PickerButton from '../lib/PickerButton.svelte';
   import PickerWrapper from '../lib/PickerWrapper.svelte';
-  //import PickerIndicator from '../lib/PickerIndicator.svelte';
 
   //#region state
   let allColors: string[] = []
@@ -25,13 +24,13 @@
   let progress_percent = $state(0);
   let history = $state<string[]>(['/']);
   let histIdx = $state(0);
-  type SortKey = "disk" | "count";
+  type SortKey = "disk" | "size" | "count";
   let sortBy = $state<SortKey>("disk");
   let sortOpen = $state(false);
   let selectedUser = $state("All Users");
   let selectedUserColor = $state('#353599')
   let users = $state<string[]>([]);
-  let userColors = $state(new SvelteMap<string, string>()); // cache: username -> color
+  let userColors = $state(new SvelteMap<string, string>());
   let userDropdown = $state<{user:string;color:string}[]>([]);
   let pathInput = $state();
   let isEditing = $state(false);
@@ -61,7 +60,6 @@
   }
   addRenderer('color', colorRenderer);
 
-  // Seed colors for known users (optional)
   function createUserDropdown(usernames: string[]) {
     usernames.forEach((uname, index) => {
       if (!userColors.has(uname)) {
@@ -72,54 +70,46 @@
     userDropdown = Array.from(userColors.entries()).map(([user, color]) => ({user,color}))
   }
 
-  // Deterministic color for any username (stable + cached)
-  // function colorForUsername(uname: string): string {
-  //   const cached = userColors.get(uname);
-  //   if (cached) return cached;
-  //   let h = 0;
-  //   for (let i = 0; i < uname.length; i++) {
-  //     h = (h * 31 + uname.charCodeAt(i)) >>> 0;
-  //   }
-  //   const color = allColors[h % allColors.length];
-  //   userColors.set(uname, color);
-  //   return color;
-  // }
   //#endregion
 
   //#region types
   type Age = {
     count: number;
-    disk: number;  // bytes
-    atime: number; // unix seconds
-    mtime: number; // unix seconds
+    disk: number;
+    size: number;
+    linked: number;
+    atime: number;
+    mtime: number;
   }
   type RawFolder = {
     path: string;
-    // username -> "0"/"1"/"2" -> Age
     users: Record<string, Record<string, Age>>;
   }
   type UserStatsJson = {
     username: string;
     count: number;
-    disk: number; // bytes
+    disk: number;
+    size: number;
+    linked: number;
     atime: number;
     mtime: number;
   }
   type FolderItem = {
     path: string;
     total_count: number;
-    total_disk: number; // bytes
-    accessed: number;   // unix time
-    modified: number;   // unix time
-    users: Record<string, UserStatsJson>; // keyed by username (aggregated across ages)
+    total_disk: number;
+    total_size: number;
+    total_linked: number;
+    accessed: number;
+    modified: number;
+    users: Record<string, UserStatsJson>;
   }
-  // Scanned file from /api/files
   type ScannedFile = {
     path: string;
-    size: number;      // bytes
-    accessed: number;  // unix
-    modified: number;  // unix
-    owner: string;     // username
+    size: number;
+    accessed: number;
+    modified: number;
+    owner: string;
   }
   //#endregion
 
@@ -182,7 +172,7 @@
   }
 
   function showTip(e: MouseEvent, userData: UserStatsJson, percent: number) {
-    cancelHide(); // keep it open while interacting
+    cancelHide();
     const { x, y } = clampToViewport(e.clientX, e.clientY);
     tip = {
       show: true,
@@ -195,7 +185,7 @@
   }
   function moveTip(e: MouseEvent) {
     if (!tip.show) return;
-    cancelHide(); // moving over the target keeps it alive
+    cancelHide();
     const { x, y } = clampToViewport(e.clientX, e.clientY);
     tip = { ...tip, x, y };
   }
@@ -204,7 +194,7 @@
     tip = { show: false, x: 0, y: 0 };
   }
 
-  const HIDE_DELAY = 1200; // ms — tweak to taste
+  const HIDE_DELAY = 1200;
   let hideTimer: number | null = $state(null);
 
   function scheduleHide(ms = HIDE_DELAY) {
@@ -226,34 +216,38 @@
   //#region folders and files bars
 
   function transformFolders(raw: RawFolder[], filter: AgeFilter): FolderItem[] {
-    // Ages to include
     const ages: string[] = filter === -1 ? ["0","1","2"] : [String(filter)];
 
     return (raw ?? [])
       .map((rf) => {
         const usersAgg: Record<string, UserStatsJson> = {};
         let total_count = 0;
+        let total_size = 0;
         let total_disk  = 0;
+        let total_linked = 0;
         let max_atime   = 0;
         let max_mtime   = 0;
 
         const userEntries = Object.entries(rf.users ?? {});
         for (const [uname, agesMap] of userEntries) {
-          let u_count = 0, u_disk = 0, u_atime = 0, u_mtime = 0;
+          let u_count = 0, u_disk = 0, u_size = 0, u_linked = 0, u_atime = 0, u_mtime = 0;
 
           for (const a of ages) {
             const s = agesMap?.[a];
-            if (!s) 
-              continue;
-            // coerce defensively
+            if (!s) continue;
+            
             const c = Number(s.count ?? 0);
             const dk = Number(s.disk ?? 0);
-            const at = Number(s.mtime ?? 0);
+            const sz = Number(s.size ?? 0);
+            const lk = Number(s.linked ?? 0);
+            const at = Number(s.atime ?? 0);
             const mt = Number(s.mtime ?? 0);
 
             u_count += Number.isFinite(c) ? c : 0;
             u_disk  += Number.isFinite(dk) ? dk : 0;
-            if (Number.isFinite(at) && at > u_atime) 
+            u_size  += Number.isFinite(sz) ? sz : 0;
+            u_linked += Number.isFinite(lk) ? lk : 0;
+            if (Number.isFinite(at) && at > u_atime)
               u_atime = at;
             if (Number.isFinite(mt) && mt > u_mtime) 
               u_mtime = mt;
@@ -264,11 +258,15 @@
               username: uname,
               count: u_count,
               disk:  u_disk,
+              size:  u_size,
+              linked: u_linked,
               atime: u_atime,
               mtime: u_mtime,
             };
             total_count += u_count;
             total_disk  += u_disk;
+            total_size  += u_size;
+            total_linked += u_linked;
             if (u_atime > max_atime) 
               max_atime = u_atime;
             if (u_mtime > max_mtime) 
@@ -280,18 +278,21 @@
           path: rf.path,
           total_count,
           total_disk,
+          total_size,
+          total_linked,
           accessed: max_atime,
           modified: max_mtime,
           users: usersAgg,
         };
       })
-      // hide folders with no data after filter
       .filter(f => Object.keys(f.users).length > 0);
   }
+  
   const toNum = (v: any) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   }
+  
   // ---------- Sorting (Folders) ----------
   const sortedFolders = $derived.by(() => {
     const key = sortBy;
@@ -303,6 +304,10 @@
           aVal = toNum(a?.total_disk);
           bVal = toNum(b?.total_disk);
           break;
+        case "size":
+          aVal = toNum(a?.total_size);
+          bVal = toNum(b?.total_size);
+          break;
         case "count":
           aVal = toNum(a?.total_count);
           bVal = toNum(b?.total_count);
@@ -311,7 +316,7 @@
       return bVal - aVal;
     });
   })
-  // Folder progress bar max
+  
   let maxMetric = $derived.by(() => {
     const key = sortBy;
     const vals =
@@ -319,6 +324,8 @@
         switch (key) {
           case "disk":
             return toNum(f?.total_disk);
+          case "size":
+            return toNum(f?.total_size);
           case "count":
             return toNum(f?.total_count);
         }
@@ -326,22 +333,27 @@
     const max = Math.max(0, ...vals);
     return max > 0 ? max : 1;
   })
+  
   const pct = (n: any) => {
     const x = toNum(n);
     const p = (x / maxMetric) * 100;
     const clamped = Math.max(0, Math.min(100, p));
     return Math.round(clamped * 10) / 10;
   }
+  
   const displaySortBy = (key: string) => {
     switch (key) {
       case "disk":
         return 'Disk Usage'
+      case "size":
+        return 'File Size'
       case "count":
         return 'Total Files'
       default:
         return 'Disk Usage'
     }
   }
+  
   function clickOutside(
     node: HTMLElement,
     cb: (() => void) | { close: () => void }
@@ -370,49 +382,72 @@
       },
     };
   }
+  
   const metricValue = (file: FolderItem) => {
     switch (sortBy) {
       case "disk":
         return toNum(file?.total_disk);
+      case "size":
+        return toNum(file?.total_size);
       case "count":
         return toNum(file?.total_count);
     }
   }
-  // Right label (folders) – sizes already in BYTES
+  
   function rightValueFolder(folder: FolderItem) {
     switch (sortBy) {
       case "disk":
         return humanBytes(toNum(folder?.total_disk));
+      case "size":
+        return humanBytes(toNum(folder?.total_size));
       case "count":
         return `${humanCount(toNum(folder?.total_count))} Files`;
     }
   }
+  
   function bottomValueFolder(folder: FolderItem) {
     switch (sortBy) {
       case "disk":
-        return `${humanCount(toNum(folder?.total_count))} Files`;  
+        return `${humanCount(toNum(folder?.total_count))} Files • ${humanCount(toNum(folder?.total_linked))} Linked`;
+      case "size":
+        return `${humanCount(toNum(folder?.total_count))} Files • ${humanCount(toNum(folder?.total_disk))} On disk`;
       case "count":
-        return humanBytes(toNum(folder?.total_disk));  
+        return humanBytes(toNum(folder?.total_disk));
     }
   }
+  
   function rightValueFile(f: ScannedFile) {
     switch (sortBy) {
       case "disk":
-        return humanBytes(toNum(f.size)); // bytes
+      case "size":
+        return humanBytes(toNum(f.size));
       case "count":
         return "1";
     }
   }
-  // Per-user right label – sizes already in BYTES
+  
   function rightValueUser(userData: UserStatsJson) {
     switch (sortBy) {
       case "disk":
         return humanBytes(toNum(userData?.disk));
+      case "size":
+        return humanBytes(toNum(userData?.size));
       case "count":
         return humanCount(toNum(userData?.count));
     }
   }
-  const userMetricFor = (ud: UserStatsJson) => sortBy === "disk" ? Number(ud.disk) : Number(ud.count);
+  
+  const userMetricFor = (ud: UserStatsJson) => {
+    switch (sortBy) {
+      case "disk":
+        return Number(ud.disk);
+      case "size":
+        return Number(ud.size);
+      case "count":
+        return Number(ud.count);
+    }
+  }
+  
   function sortedUserEntries(file: FolderItem) {
     return Object.entries(file?.users ?? {}).sort(([, a], [, b]) => userMetricFor(a) - userMetricFor(b));
   }
@@ -420,14 +455,17 @@
   function aggregatePathTotals(foldersArr: FolderItem[], filesArr: ScannedFile[], p: string): FolderItem {
     let total_count = 0;
     let total_disk = 0;
+    let total_size = 0;
+    let total_linked = 0;
     let accessed = 0; 
     let modified = 0; 
     const aggUsers: Record<string, UserStatsJson> = {};
 
-    // Aggregate folders (existing logic)
     for (const f of foldersArr ?? []) {
       total_count += toNum(f?.total_count);
       total_disk  += toNum(f?.total_disk);
+      total_size  += toNum(f?.total_size);
+      total_linked += toNum(f?.total_linked);
       if (f.accessed > accessed) 
         accessed = f.accessed;
       if (f.modified > modified) 
@@ -437,35 +475,40 @@
       for (const [uname, data] of Object.entries(u)) {
         const d = data as UserStatsJson;
         const prev = aggUsers[uname] ?? { 
-          username: uname, count: 0, disk: 0, atime: 0, mtime: 0 };
+          username: uname, count: 0, disk: 0, size: 0, linked: 0, atime: 0, mtime: 0 
+        };
         aggUsers[uname] = {
           username: uname,
           count: prev.count + toNum(d.count),
           disk:  prev.disk  + toNum(d.disk),
+          size:  prev.size  + toNum(d.size),
+          linked: prev.linked + toNum(d.linked),
           atime: Math.max(prev.atime, toNum(d.atime)),
           mtime: Math.max(prev.mtime, toNum(d.mtime)),
         };
       }
     }
 
-    // Aggregate files (new logic)
     for (const file of filesArr ?? []) {
-      total_count += 1;  // Each file counts as 1
+      total_count += 1;
       total_disk += toNum(file?.size);
+      total_size += toNum(file?.size);
       if (file.accessed > accessed) 
         accessed = file.accessed;
       if (file.modified > modified) 
         modified = file.modified;
       
-      // Aggregate user stats for this file
       const owner = file.owner;
       if (owner) {
         const prev = aggUsers[owner] ?? { 
-          username: owner, count: 0, disk: 0, atime: 0, mtime: 0 };
+          username: owner, count: 0, disk: 0, size: 0, linked: 0, atime: 0, mtime: 0 
+        };
         aggUsers[owner] = {
           username: owner,
           count: prev.count + 1,
           disk: prev.disk + toNum(file.size),
+          size: prev.size + toNum(file.size),
+          linked: prev.linked,
           atime: Math.max(prev.atime, toNum(file.accessed)),
           mtime: Math.max(prev.mtime, toNum(file.modified)),
         };
@@ -476,6 +519,8 @@
       path: p,
       total_count,
       total_disk,
+      total_size,
+      total_linked,
       accessed,
       modified,
       users: aggUsers,
@@ -483,30 +528,35 @@
   }
 
   const pathTotals = $derived.by(() => aggregatePathTotals(folders, files, path));
+  
   // ---------- Sorting (Files) ----------
   function fileMetricValue(f: ScannedFile) {
     switch (sortBy) {
       case "disk":
-        return toNum(f.size); // bytes
+      case "size":
+        return toNum(f.size);
       case "count":
         return 1;
     }
   }
+  
   const sortedfiles = $derived.by(() => {
     const arr = files ? [...files] : [];
     return arr.sort((a, b) => fileMetricValue(b) - fileMetricValue(a));
   });
+  
   const maxFileMetric = $derived.by(() => {
-    // Use the parent folder's total as the maximum for file bars
-    const parentTotal = sortBy === "disk" ? pathTotals.total_disk : pathTotals.total_count;
+    const parentTotal = sortBy === "disk" ? pathTotals.total_disk : 
+                       sortBy === "size" ? pathTotals.total_size : 
+                       pathTotals.total_count;
     return parentTotal > 0 ? parentTotal : 1;
   });
+  
   const filePct = (f: ScannedFile) => Math.round((fileMetricValue(f) / maxFileMetric) * 1000) / 10;
   
   //#endregion
 
   //#region fetch data
-  // single-flight fetch
   function createDoItAgain<T extends any[]>(fn: (...args: T) => Promise<void>) {
     let running = false;
     let nextArgs: T | null = null;
@@ -525,15 +575,16 @@
       }
     };
   }
+  
   const fetchFolders = createDoItAgain(async (_p: string) => {
     loading = true;
     try {
       const userFilter: string[] = selectedUser === 'All Users' ? [] : [selectedUser];
-
-      // Pass age filter to both endpoints
       const raw: RawFolder[] = await api.getFolders(_p, userFilter, ageFilter);
+      console.log("Raw folders:", raw);
       folders = transformFolders(raw, ageFilter);
       files = await api.getFiles(_p, userFilter, ageFilter);
+      console.log("Files:", files);
     } finally {
       loading = false;
     }
@@ -548,25 +599,31 @@
     history.push(p);
     histIdx = history.length - 1;
   }
+  
   function chooseSort(key: SortKey) {
     sortBy = key;
     sortOpen = false;
   }
+  
   function navigateTo(p) {
     setPath(p);
     pushHistory(fullPath || path);
     fetchFolders(fullPath || path);
   }
+  
   function refresh() {
     fetchFolders(fullPath || path);
   }
+  
   function goHome() {
     navigateTo('/');
   }
+  
   function goUp() {
     const parent = getParent(fullPath || path);
     navigateTo(parent);
   }
+  
   function goBack() {
     if (histIdx > 0) {
       histIdx -= 1;
@@ -574,6 +631,7 @@
       fetchFolders(history[histIdx]);
     }
   }
+  
   function goForward() {
     if (histIdx < history.length - 1) {
       histIdx += 1;
@@ -581,12 +639,10 @@
       fetchFolders(history[histIdx]);
     }
   }
+  
   function onUserChanged() {
     console.log('selected user:',selectedUser)
     selectedUserColor = userColors.get(selectedUser) ?? '#000000'
-    // if (!selectedUser || selectedUser===null) {
-    //   selectedUser = 'All Users'
-    // }
     refresh()
   }
 
@@ -606,14 +662,13 @@
       path = displayedPath;
     }
   }
-  // Function to truncate path from the beginning
+  
   function truncatePathFromStart(inputPath, maxLength = 50) {
     if (!inputPath || inputPath.length <= maxLength) return inputPath;
 
     const parts = inputPath.split('/');
-    let result = parts[parts.length - 1]; // Start with filename
+    let result = parts[parts.length - 1];
 
-    // Add directories from the end until we approach maxLength
     for (let i = parts.length - 2; i >= 0; i--) {
       const potential = parts[i] + '/' + result;
       if (('...' + potential).length > maxLength) break;
@@ -622,12 +677,14 @@
 
     return '...' + result;
   }
+  
   function onPathFocus() {
     isEditing = true;
     if (fullPath) {
       path = fullPath;
     }
   }
+  
   function onPathBlur() {
     isEditing = false;
     if (path && !path.startsWith('...')) {
@@ -637,6 +694,7 @@
       path = truncatePathFromStart(fullPath);
     }
   }
+  
   function displayPath(p: string): string {
     if (!p) return "/";
     let s = p.replace(/\\/g, "/");
@@ -644,13 +702,13 @@
     if (!s.startsWith("/")) s = "/" + s;
     return s || "/";
   }
+  
   function onPathKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") {
       navigateTo(fullPath || path);
     }
   }
 
-  // Function to copy text from input/textarea
 	async function copyText(e) {
     let element = e.currentTarget
     try {
@@ -664,7 +722,6 @@
     }
 	}
 
-	// Show copy feedback notification
 	function showCopyFeedback() {
 		copyFeedbackVisible = true;
 		setTimeout(() => {
@@ -734,6 +791,9 @@
           <button class="w-full text-left px-3 py-2 hover:bg-gray-700 text-nowrap" onclick={() => chooseSort("disk")}>
             By Disk Usage
           </button>
+          <button class="w-full text-left px-3 py-2 hover:bg-gray-700 text-nowrap" onclick={() => chooseSort("size")}>
+            By File Size
+          </button>
           <button class="w-full text-left px-3 py-2 hover:bg-gray-700" onclick={() => chooseSort("count")}>
             By Total Files
           </button>
@@ -797,10 +857,9 @@
         components={{ 
           input: PickerButton,  
           wrapper: PickerWrapper, 
-          //pickerIndicator: PickerIndicator 
         }}
         label="Change User Color"
-        onInput={(e)=>{
+onInput={(e)=>{
           userColors.set(selectedUser, selectedUserColor)
           userDropdown = Array.from(userColors.entries()).map(([user, color]) => ({user,color}))
         }}
@@ -828,9 +887,9 @@
       <!-- Total bar background -->
       <div class="flex absolute left-0 top-0 bottom-0 z-0" style="width: 100%">
         {#each sortedUserEntries(pathTotals) as [uname, userData] (uname)}
-          {@const userMetric = sortBy === "disk" ? userData.disk : userData.count}
+          {@const userMetric = sortBy === "disk" ? userData.disk : sortBy === "size" ? userData.size : userData.count}
           {@const totalMetric =
-            sortBy === "disk" ? pathTotals.total_disk :  pathTotals.total_count}
+            sortBy === "disk" ? pathTotals.total_disk : sortBy === "size" ? pathTotals.total_size : pathTotals.total_count}
           {@const userPercent = totalMetric > 0 ? (userMetric / totalMetric) * 100 : 0}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
@@ -903,8 +962,8 @@
           <!-- Folder bar background -->
           <div class="absolute left-0 top-0 bottom-0 flex z-0" style="width: {pct(metricValue(folder))}%">
             {#each sortedUserEntries(folder) as [uname, userData]}
-              {@const userMetric = sortBy === "disk" ? userData.disk : userData.count}
-              {@const totalMetric = sortBy === "disk" ? folder.total_disk : folder.total_count}
+              {@const userMetric = sortBy === "disk" ? userData.disk : sortBy === "size" ? userData.size : userData.count}
+              {@const totalMetric = sortBy === "disk" ? folder.total_disk : sortBy === "size" ? folder.total_size : folder.total_count}
               {@const userPercent = totalMetric > 0 ? (userMetric / totalMetric) * 100 : 0}
               <div
                 class="h-full transition-all duration-300 min-w-[0.5px] hover:opacity-90"
