@@ -68,7 +68,9 @@ pub struct FsItemOut {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Age {
     pub count: u64,
-    pub disk:  u64,  // bytes
+    pub size: u64,   // total file size (includes hard link duplicates)
+    pub disk: u64,   // actual disk usage (deduplicated)
+    pub linked: u64, // size saved by not counting hard links
     pub atime: i64,  // Unix seconds
     pub mtime: i64,  // Unix seconds
 }
@@ -185,9 +187,6 @@ async fn main() -> Result<()> {
         }
     }
     
-
-    //println!("Serving on http://{addr}  (static dir: {static_dir})");
-    //axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
     Ok(())
 }
 
@@ -206,7 +205,7 @@ pub fn is_port_taken(port: u16) -> bool {
 }
 
 
-/// PSOT /api/login
+/// POST /api/login
 async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
     // Check if the user sent the credentials
     if payload.username.is_empty() || payload.password.is_empty() {
@@ -264,11 +263,6 @@ async fn users_handler(claims: Claims) -> impl IntoResponse {
 
 /// GET /api/folders?path=/some/dir&users=alice,bob&age=1
 async fn get_folders_handler(claims: Claims, Query(q): Query<FolderQuery>) -> impl IntoResponse {
-    // println!(
-    //     "GET /api/folders raw path={:?} users={:?} age={:?} as={} admin={}",
-    //     q.path, q.users, q.age, claims.sub, claims.is_admin
-    // );
-
     // normalize path
     let mut path = q.path.unwrap_or_else(|| "/".to_string());
     if path.is_empty() { path = "/".to_string(); }
@@ -279,10 +273,6 @@ async fn get_folders_handler(claims: Claims, Query(q): Query<FolderQuery>) -> im
         Some(s) if !s.trim().is_empty() => parse_users_csv(s),
         _ => Vec::new(),
     };
-    // println!(
-    //     "GET /api/folders normalized path={} requested_users={:?} age={:?}",
-    //     path, requested, q.age
-    // );
 
     // authorization
     if !claims.is_admin {
@@ -309,11 +299,6 @@ async fn get_folders_handler(claims: Claims, Query(q): Query<FolderQuery>) -> im
 
 /// GET /api/files?path=/some/dir&users=alice,bob&age=1
 async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> impl IntoResponse {
-    // println!(
-    //     "GET /api/files raw path={:?} users={:?} age={:?} as={} admin={}",
-    //     q.path, q.users, q.age, claims.sub, claims.is_admin
-    // );
-
     // validate path
     let folder = match q.path.as_deref() {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -338,7 +323,6 @@ async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> impl 
     }
 
     let age = q.age;
-    //println!("GET /api/files scan folder={} requested_users={:?} age={:?}", folder, requested, age);
 
     // run blocking scan
     let fut = tokio::task::spawn_blocking(move || get_items(folder, &requested, age));
@@ -461,7 +445,7 @@ pub fn get_items<P: AsRef<std::path::Path>>(
 // ===================== Aggregated index (folders) =====================
 pub fn count_lines(path: &Path) -> Result<usize> {
     let mut file = File::open(path)?;
-    let mut buf = [0u8; 128 * 1024]; // 128 KiB is plenty; adjust if you like
+    let mut buf = [0u8; 128 * 1024];
     let mut count = 0usize;
     let mut last: Option<u8> = None;
 
@@ -474,7 +458,7 @@ pub fn count_lines(path: &Path) -> Result<usize> {
 
     if let Some(b) = last {
         if b != b'\n' {
-            count += 1; // account for final line without trailing newline
+            count += 1;
         }
     }
     Ok(count)
@@ -483,15 +467,16 @@ pub fn count_lines(path: &Path) -> Result<usize> {
 #[derive(Default, Debug, Clone)]
 struct Stats {
     file_count: u64,
-    disk_bytes: u64,   // from CSV
-    latest_atime: i64, // Unix seconds
-    latest_mtime: i64, // Unix seconds
+    file_size: u64,   // total file size (includes hard link duplicates)
+    disk_bytes: u64,  // actual disk usage (deduplicated)
+    linked_size: u64, // size saved by not counting hard links
+    latest_atime: i64,
+    latest_mtime: i64,
 }
 
 #[derive(Debug, Clone)]
 struct TrieNode {
     children: HashMap<String, Box<TrieNode>>,
-    // only used to quickly discover which users exist under a path
     users: HashSet<String>,
 }
 impl TrieNode {
@@ -502,9 +487,7 @@ impl TrieNode {
 pub struct InMemoryFSIndex {
     root: TrieNode,
     total_entries: usize,
-    // Single authoritative index
     per_user_age: HashMap<(String, String, u8), Stats>, // (path, username, age)
-    // To know which users exist under a given path quickly
     users_by_path: HashMap<String, HashSet<String>>,
 }
 
@@ -518,7 +501,7 @@ impl InMemoryFSIndex {
         }
     }
 
-    /// CSV columns (with header): path,user,age,files,disk,modified
+    /// CSV columns (with header): path,user,age,files,size,disk,linked,accessed,modified
     pub fn load_from_csv(&mut self, path: &Path) -> Result<Vec<String>> {
         // Count total lines for progress tracking
         print!("Counting lines in {}... ", path.display());
@@ -539,7 +522,7 @@ impl InMemoryFSIndex {
 
         for (line_no, record) in rdr.records().enumerate() {
             let record = record.with_context(|| format!("Failed to read CSV line {}", line_no + 2))?;
-            if record.len() < 6 {
+            if record.len() < 9 {
                 continue;
             }
 
@@ -547,9 +530,11 @@ impl InMemoryFSIndex {
             let username           = record.get(1).unwrap_or("").trim().to_string();
             let age: u8            = record.get(2).unwrap_or("0").parse().unwrap_or(0);
             let file_count: u64    = record.get(3).unwrap_or("0").parse().unwrap_or(0);
-            let disk_bytes: u64    = record.get(4).unwrap_or("0").parse().unwrap_or(0);
-            let latest_atime: i64  = record.get(5).unwrap_or("0").parse().unwrap_or(0);
-            let latest_mtime: i64  = record.get(6).unwrap_or("0").parse().unwrap_or(0);
+            let file_size: u64     = record.get(4).unwrap_or("0").parse().unwrap_or(0);
+            let disk_bytes: u64    = record.get(5).unwrap_or("0").parse().unwrap_or(0);
+            let linked_size: u64   = record.get(6).unwrap_or("0").parse().unwrap_or(0);
+            let latest_atime: i64  = record.get(7).unwrap_or("0").parse().unwrap_or(0);
+            let latest_mtime: i64  = record.get(8).unwrap_or("0").parse().unwrap_or(0);
 
             if path_str.is_empty() || username.is_empty() {
                 continue;
@@ -567,7 +552,9 @@ impl InMemoryFSIndex {
             // Single index: (path, user, age)
             let entry = self.per_user_age.entry((pkey, username, age)).or_insert_with(Stats::default);
             entry.file_count = entry.file_count.saturating_add(file_count);
+            entry.file_size = entry.file_size.saturating_add(file_size);
             entry.disk_bytes = entry.disk_bytes.saturating_add(disk_bytes);
+            entry.linked_size = entry.linked_size.saturating_add(linked_size);
             if latest_atime > entry.latest_atime {
                 entry.latest_atime = latest_atime;
             }
@@ -604,8 +591,8 @@ impl InMemoryFSIndex {
     pub fn list_children(
         &self,
         dir_path: &str,
-        user_filter: &Vec<String>, // [] => all users
-        age_filter: Option<u8>,     // Some(0|1|2) or None
+        user_filter: &Vec<String>,
+        age_filter: Option<u8>,
     ) -> Result<Vec<FolderOut>> {
         // descend to the directory node
         let components = Self::path_to_components(dir_path);
@@ -651,12 +638,8 @@ impl InMemoryFSIndex {
                 continue;
             }
 
-            // Build users -> username -> ages map and compute totals for this folder
+            // Build users -> username -> ages map
             let mut users_map: HashMap<String, HashMap<String, Age>> = HashMap::new();
-            let mut total_count: u64 = 0;
-            let mut total_disk:  u64 = 0;
-            let mut accessed:    i64 = 0;
-            let mut modified:    i64 = 0;
 
             let ages_to_consider: Vec<u8> = if let Some(a) = age_filter { vec![a] } else { vec![0,1,2] };
 
@@ -667,19 +650,12 @@ impl InMemoryFSIndex {
                     if let Some(s) = self.per_user_age.get(&(pkey.clone(), uname.clone(), *a)) {
                         age_map.insert(a.to_string(), Age {
                             count: s.file_count,
-                            disk:  s.disk_bytes,
+                            size: s.file_size,
+                            disk: s.disk_bytes,
+                            linked: s.linked_size,
                             atime: s.latest_atime,
                             mtime: s.latest_mtime,
                         });
-
-                        total_count = total_count.saturating_add(s.file_count);
-                        total_disk  = total_disk.saturating_add(s.disk_bytes);
-                        if s.latest_atime > accessed {
-                            accessed = s.latest_atime;
-                        }
-                        if s.latest_mtime > modified {
-                            modified = s.latest_mtime;
-                        }
                     }
                 }
 
@@ -738,15 +714,15 @@ fn get_users() -> &'static Vec<String> {
 #[derive(Deserialize)]
 struct FolderQuery {
     path: Option<String>,
-    users: Option<String>, // "alice,bob"
-    age:   Option<u8>,     // 0|1|2
+    users: Option<String>,
+    age:   Option<u8>,
 }
 
 #[derive(Deserialize)]
 struct FilesQuery {
     path: Option<String>,
     users: Option<String>,
-    age:   Option<u8>,     // 0|1|2
+    age:   Option<u8>,
 }
 
 fn parse_users_csv(s: &str) -> Vec<String> {
@@ -759,7 +735,7 @@ fn parse_users_csv(s: &str) -> Vec<String> {
 
 fn default_static_dir() -> String {
     let mut exe_dir = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    exe_dir.pop(); // remove the binary name
+    exe_dir.pop();
     let static_dir = exe_dir.join("public");
     eprintln!("{}",format!("Using default static dir: {}", static_dir.display() ).yellow());
     static_dir.to_string_lossy().into_owned()
@@ -777,22 +753,21 @@ mod tests {
     use std::io::Write;
     use tempfile::{tempdir, NamedTempFile};
     
-    const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024; // 2 MiB is plenty for these payloads
+    const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
-    /// Build a tiny CSV and initialize FS_INDEX + USERS exactly once.
     fn init_index_once() {
         if FS_INDEX.get().is_some() {
             return;
         }
 
-        // CSV columns: path,user,age,files,disk,atime,mtime
+        // CSV columns: path,user,age,files,size,disk,linked,atime,mtime
         let mut f = NamedTempFile::new().expect("tmp csv");
         writeln!(
             f,
-            "path,user,age,files,disk,atime,mtime\n\
-             /,alice,0,2,100,1700000000,1700000100\n\
-             /,bob,1,1,50,1600000000,1600000100\n\
-             /docs,alice,2,3,300,1500000000,1500000050\n"
+            "path,user,age,files,size,disk,linked,atime,mtime\n\
+             /,alice,0,2,200,100,0,1700000000,1700000100\n\
+             /,bob,1,1,50,50,0,1600000000,1600000100\n\
+             /docs,alice,2,3,600,300,300,1500000000,1500000050\n"
         )
         .unwrap();
         let p = f.into_temp_path();
@@ -813,12 +788,10 @@ mod tests {
     #[test]
     fn test_count_lines_variants() {
         let mut f = NamedTempFile::new().unwrap();
-        // two lines, trailing newline
         write!(f, "a\nb\n").unwrap();
         assert_eq!(count_lines(f.path()).unwrap(), 2);
 
         let mut g = NamedTempFile::new().unwrap();
-        // two lines, no trailing newline
         write!(g, "a\nb").unwrap();
         assert_eq!(count_lines(g.path()).unwrap(), 2);
     }
@@ -834,10 +807,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial] // FS_INDEX/USERS are global
+    #[serial]
     async fn test_users_handler_admin_and_user() {
         init_index_once();
-        // Admin should receive full list
         let admin = Claims {
             sub: "root".to_string(),
             is_admin: true,
@@ -850,7 +822,6 @@ mod tests {
         assert!(list.contains(&"alice".to_string()));
         assert!(list.contains(&"bob".to_string()));
 
-        // Non-admin should receive only self
         let user = Claims {
             sub: "alice".to_string(),
             is_admin: false,
@@ -867,7 +838,6 @@ mod tests {
     async fn test_get_folders_handler_authz_and_filters() {
         init_index_once();
 
-        // Non-admin asking "all users" -> Forbidden
         let non_admin = Claims {
             sub: "alice".into(),
             is_admin: false,
@@ -875,13 +845,12 @@ mod tests {
         };
         let q_all = FolderQuery {
             path: Some("/".into()),
-            users: None, // empty means "all"
+            users: None,
             age: None,
         };
         let resp = get_folders_handler(non_admin.clone(), Query(q_all)).await.into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-        // Non-admin asking for self only -> OK
         let q_self = FolderQuery {
             path: Some("/".into()),
             users: Some("alice".into()),
@@ -890,11 +859,9 @@ mod tests {
         let resp = get_folders_handler(non_admin, Query(q_self)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
-        // Expect JSON array of FolderOut
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.is_array());
 
-        // Admin asking all -> OK, has children like "/docs"
         let admin = Claims {
             sub: "root".into(),
             is_admin: true,
@@ -910,7 +877,6 @@ mod tests {
         let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
         let arr: Vec<FolderOut> = serde_json::from_slice(&body).unwrap();
         assert!(arr.iter().any(|it| it.path == "/docs"));
-        // Check that at least one user has data in "/docs"
         let docs = arr.into_iter().find(|it| it.path == "/docs").unwrap();
         assert!(!docs.users.is_empty());
     }
@@ -923,7 +889,7 @@ mod tests {
             exp: 9_999_999_999usize,
         };
         let q = FilesQuery {
-            path: None, // BAD
+            path: None,
             users: None,
             age: None,
         };
@@ -934,7 +900,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_get_files_handler_unix_admin_ok() {
-        // Make a temp dir with one file
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("a.txt");
         std::fs::write(&file_path, b"hi").unwrap();
@@ -946,7 +911,7 @@ mod tests {
         };
         let q = FilesQuery {
             path: Some(dir.path().to_string_lossy().into()),
-            users: None, // all users (allowed for admin)
+            users: None,
             age: None,
         };
 
@@ -970,7 +935,6 @@ mod tests {
             is_admin: false,
             exp: 9_999_999_999usize,
         };
-        // Requesting "all users" -> forbidden for non-admin
         let q = FilesQuery {
             path: Some(dir.path().to_string_lossy().into()),
             users: None,
@@ -995,14 +959,12 @@ mod tests {
             age: None,
         };
         let resp = get_files_handler(claims, Query(q)).await.into_response();
-        // handler maps get_items() error to 501 when not unix
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
    
     #[tokio::test]
     async fn test_login_missing_credentials() {
-        // No need to hit PAM/fake auth to test this branch
         let bad1 = AuthPayload {
             username: "".into(),
             password: "x".into(),
@@ -1024,29 +986,47 @@ mod tests {
         init_index_once();
         let idx = FS_INDEX.get().unwrap();
 
-        // all users under "/" (admin-like call)
         let items = idx.list_children("/", &Vec::new(), None).unwrap();
         assert!(items.iter().any(|it| it.path == "/docs"));
 
-        // filter by alice only
         let items_alice = idx
             .list_children("/", &vec!["alice".into()], None)
             .unwrap();
         assert!(items_alice.iter().any(|it| it.path == "/docs"));
-        // in "/docs", expect only "alice" present
         let docs = items_alice
             .into_iter()
             .find(|it| it.path == "/docs")
             .unwrap();
         assert!(docs.users.contains_key("alice"));
 
-        // age filter: only age 2 under "/docs" (from fixture CSV)
         let items_age2 = idx
             .list_children("/", &Vec::new(), Some(2))
             .unwrap();
         let docs2 = items_age2.into_iter().find(|it| it.path == "/docs").unwrap();
-        // Age map keys are strings "0","1","2"
         let alice_ages = docs2.users.get("alice").unwrap();
         assert!(alice_ages.contains_key("2"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_stats_accumulation_with_linked() {
+        let mut stats = Stats::default();
+        
+        // First entry: regular file
+        stats.file_count = 1;
+        stats.file_size = 1000;
+        stats.disk_bytes = 1000;
+        stats.linked_size = 0;
+        
+        // Second entry: hard link
+        stats.file_count += 1;
+        stats.file_size += 1000;
+        stats.disk_bytes += 0;  // Not counted again
+        stats.linked_size += 1000;  // Saved by deduplication
+        
+        assert_eq!(stats.file_count, 2);
+        assert_eq!(stats.file_size, 2000);
+        assert_eq!(stats.disk_bytes, 1000);
+        assert_eq!(stats.linked_size, 1000);
     }
 }
