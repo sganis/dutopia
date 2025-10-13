@@ -7,14 +7,10 @@ cargo clean
 cd ../browser
 rm -rf nodes_modules
 rm -f package-lock.json
-cd ../desktop
 rm -rf build
 rm -rf nodes_modules
 rm -f package-lock.json
-cd src-tauri
-cargo clean
-cargo vendor --versioned-dirs --no-delete ../../vendor
-cd ../..
+cd ..
 echo "compressing..."
 zip -qr ../dutopia.zip .
 
