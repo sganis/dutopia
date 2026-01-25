@@ -1,4 +1,4 @@
-// dusum.rs
+// rs/src/bin/dusum.rs
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;

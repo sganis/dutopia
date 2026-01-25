@@ -1,3 +1,4 @@
+// browser/src/ts/store.svelte.ts
 export const API_URL = `${import.meta.env.VITE_PUBLIC_BASE_URL}api`;
 
 export const initialState = {

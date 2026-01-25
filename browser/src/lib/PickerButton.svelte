@@ -1,3 +1,4 @@
+<!-- browser/src/lib/PickerButton.svelte -->
 <script lang="ts">
   interface Props {
 		/** DOM element of the label wrapper */

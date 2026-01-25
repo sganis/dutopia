@@ -1,2 +1,5 @@
 __pycache__/
 target/
+.env*
+.vscode/
+.DS_Store

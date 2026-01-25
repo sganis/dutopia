@@ -1,7 +1,8 @@
+<!-- browser/src/routes/+page.svelte -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { SvelteMap } from 'svelte/reactivity';
-  import { 
+  import {
     getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS,
   } from "../ts/util";
   import { api } from "../ts/api.svelte";

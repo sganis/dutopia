@@ -1,3 +1,4 @@
+<!-- browser/src/lib/TreeMap.svelte -->
 <script lang="ts">
   import Plotly from "plotly.js-dist";
   import { onMount } from "svelte";

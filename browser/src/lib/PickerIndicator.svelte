@@ -1,3 +1,4 @@
+<!-- browser/src/lib/PickerIndicator.svelte -->
 <script lang="ts">
   // API from the docs
   export let pos: { x: number; y: number };

@@ -1,4 +1,4 @@
-// duzip.rs
+// rs/src/bin/duzip.rs
 use anyhow::Result;
 use clap::{ColorChoice, Parser};
 use std::fs::File;

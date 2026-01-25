@@ -1,4 +1,4 @@
-// util.rs - Utility functions for the filesystem scanner
+// rs/src/util.rs
 use std::{
     path::{Path, PathBuf},
     time::Duration,

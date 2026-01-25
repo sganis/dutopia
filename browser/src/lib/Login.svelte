@@ -1,3 +1,4 @@
+<!-- browser/src/lib/Login.svelte -->
 <script>
     import { State, API_URL } from '../ts/store.svelte';
     import { fade } from 'svelte/transition';

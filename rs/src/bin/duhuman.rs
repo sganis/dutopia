@@ -1,4 +1,4 @@
-// duhuman.rs
+// rs/src/bin/duhuman.rs
 use anyhow::{Context, Result};
 use clap::{Parser, ColorChoice};
 use csv::{ReaderBuilder, WriterBuilder};

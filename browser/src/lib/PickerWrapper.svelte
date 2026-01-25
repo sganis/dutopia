@@ -1,3 +1,4 @@
+<!-- browser/src/lib/PickerWrapper.svelte -->
 <script lang="ts">
   interface Props {
     wrapper: HTMLElement | undefined;

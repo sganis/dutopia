@@ -1,3 +1,4 @@
+// browser/src/ts/api.svelte.ts
 import { State, API_URL } from "./store.svelte";
 import { getCache, setCache } from './cache.js';
 

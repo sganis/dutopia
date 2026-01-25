@@ -1,4 +1,4 @@
-// curveCache.js
+// browser/src/ts/cache.ts
 import { openDB } from 'idb';
 
 const DB_NAME = 'ApCacheDB';

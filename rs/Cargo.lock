@@ -634,6 +634,7 @@ dependencies = [
  "libc",
  "memchr",
  "num_cpus",
+ "regex",
  "serde",
  "serde_json",
  "serial_test",

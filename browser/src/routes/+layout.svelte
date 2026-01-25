@@ -1,5 +1,5 @@
+<!-- browser/src/routes/+layout.svelte -->
 <script>
-  // keep your imports
   import "../app.css";
   import logo from '../assets/disk_usage.svg';
   import Login from '../lib/Login.svelte';

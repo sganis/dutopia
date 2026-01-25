@@ -1,3 +1,4 @@
+// browser/src/ts/util.ts
 import { fromUnixTime, formatDistanceToNow, isFuture, format } from "date-fns";
 
 export function humanTime(unix: number): string {
