@@ -26,10 +26,16 @@ src/
 ├── lib/              # Reusable components (PascalCase)
 │   ├── Login.svelte
 │   ├── TreeMap.svelte
+│   ├── Tooltip.svelte
+│   ├── AgeFilter.svelte
+│   ├── SortDropdown.svelte
+│   ├── FolderBar.svelte
+│   ├── FileBar.svelte
+│   ├── PathStats.svelte
 │   └── Picker*.svelte
 ├── routes/           # SvelteKit pages
 │   ├── +layout.svelte
-│   └── +page.svelte  # Main dashboard (NEEDS REFACTOR)
+│   └── +page.svelte  # Main dashboard (726 lines)
 └── ts/               # TypeScript modules (lowercase)
     ├── api.svelte.ts # API client with $state
     ├── cache.ts      # IndexedDB cache (1min TTL)
@@ -76,15 +82,15 @@ Uses Svelte 5 runes:
 - `$derived.by()` for computed values
 - `SvelteMap` for reactive maps
 
-## File Size Status
+## Extracted Components
 
-Files requiring refactoring (> 600 line limit):
-- `+page.svelte`: 1,079 lines → extract components:
-  - Tooltip logic
-  - Age filter dropdown
-  - Sort dropdown
-  - Folder/file list items
-  - Path input with breadcrumb
+Components extracted from `+page.svelte` (now 726 lines):
+- `Tooltip.svelte` (42 lines) - Floating tooltip with user stats
+- `AgeFilter.svelte` (78 lines) - Age filter dropdown
+- `SortDropdown.svelte` (80 lines) - Sort by dropdown (disk/size/count)
+- `FolderBar.svelte` (144 lines) - Folder list item with user color bars
+- `FileBar.svelte` (80 lines) - File list item with owner color
+- `PathStats.svelte` (104 lines) - Path totals header bar
 
 ## Dependencies
 

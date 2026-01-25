@@ -83,38 +83,22 @@ Scanner output columns: `INODE,ATIME,MTIME,UID,GID,MODE,SIZE,DISK,PATH`
 
 ## Improvement Plan
 
-### Priority 1: Rust Performance (High Impact)
+### Completed
 
-**1.1 Cache UID→username lookups in duapi.rs**
-- `get_items()` calls `getpwuid()` for every file
-- Add `HashMap<u32, String>` cache (same pattern as dusum.rs)
-- Impact: 10-100x faster for directories with many files
+| Task | Status |
+|------|--------|
+| UID→username caching in duapi | ✅ Done (`item.rs:37-44`) |
+| Refactor duscan.rs (2,179 lines) | ✅ Done: 5 modules (main, worker, csv, merge, row) |
+| Refactor duapi.rs (1,043 lines) | ✅ Done: 5 modules (main, handler, index, item, query) |
+| Refactor util.rs (1,051 lines) | ✅ Done: 5 modules (mod, row, format, path, csv, platform) |
+| Refactor duzip.rs (958 lines) | ✅ Done: 4 modules (main, record, compress, decompress) |
+| Refactor dusum.rs (798 lines) | ✅ Done: 4 modules (main, stats, aggregate, output) |
+| Refactor +page.svelte (1,079 lines) | ✅ Done: 6 components (Tooltip, AgeFilter, SortDropdown, FolderBar, FileBar, PathStats) → 726 lines |
+| File headers on all source files | ✅ Done |
 
-**1.2 Add username cache to duhuman.rs (if not present)**
-- Same pattern - cache getpwuid results
+### Remaining Refactoring
 
-### Priority 2: File Size Refactoring (Code Health)
-
-Files exceeding 600-line hard limit:
-
-| File | Lines | Action |
-|------|-------|--------|
-| ~~`duscan.rs`~~ | ~~2,179~~ | ✅ Done: split into 5 modules |
-| `duapi.rs` | 1,032 | Extract: index.rs, handler.rs |
-| `util.rs` | 1,051 | Split: format.rs, path.rs, csv.rs, platform.rs |
-| `duzip.rs` | 958 | Split: compress.rs, decompress.rs |
-| `dusum.rs` | 798 | Extract: aggregate.rs |
-| `+page.svelte` | 1,079 | Extract: Tooltip, FolderBar, FileBar, AgeFilter |
-
-### Priority 3: Coding Convention (Quick Wins)
-
-**3.1 Add file headers** - Every file needs path comment at top:
-```rust
-// rs/src/util.rs
-```
-```typescript
-// browser/src/ts/util.ts
-```
+All refactoring complete. No files exceed the 600-line limit.
 
 ### Not Recommended (Over-engineering)
 

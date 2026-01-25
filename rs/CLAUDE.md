@@ -33,7 +33,7 @@ duscan → [raw CSV/zstd] → dusum → [aggregated CSV] → duapi → [REST API
 ### Key Data Structures
 
 - **Row** (`util.rs`): File metadata (dev, ino, mode, uid, gid, size, blocks, atime, mtime)
-- **InMemoryFSIndex** (`duapi.rs`): Trie-based path index with per-user/age stats
+- **InMemoryFSIndex** (`duapi/index.rs`): Trie-based path index with per-user/age stats
 - **UserStats** (`dusum.rs`): Aggregated file counts, sizes, timestamps per user
 
 ### CSV Format
@@ -58,7 +58,6 @@ device-inode,epoch,epoch,uid,gid,octal,bytes,bytes,path
 - OnceLock for lazy global initialization
 
 **Known issues:**
-- `duapi.rs:get_items()` calls `getpwuid()` per file - should cache
 - `duscan.rs` sorted mode loads all lines into memory - use external sort for >1GB
 
 ## Platform-Specific Code
@@ -88,10 +87,41 @@ src/bin/duscan/
 └── row.rs    (160 lines) - Row operations, stat_row
 ```
 
-## File Size Status
+### duapi (multi-file binary)
+```
+src/bin/duapi/
+├── main.rs    (219 lines) - CLI, server setup, TLS config
+├── handler.rs (400 lines) - Route handlers (login, users, folders, files)
+├── index.rs   (484 lines) - InMemoryFSIndex, TrieNode, CSV loading
+├── item.rs    (177 lines) - FsItemOut, get_items with UID caching
+└── query.rs   (48 lines)  - Query types, parse_users_csv
+```
 
-Files requiring refactoring (> 600 line limit):
-- `duapi.rs`: 1,032 lines (extract index, handlers)
-- `util.rs`: 1,051 lines (split by concern)
-- `duzip.rs`: 958 lines
-- `dusum.rs`: 798 lines
+### duzip (multi-file binary)
+```
+src/bin/duzip/
+├── main.rs      (47 lines)  - CLI entry point
+├── record.rs    (365 lines) - BinaryRecord, CSV parsing
+├── compress.rs  (145 lines) - csv_to_zst, write_binary_record
+└── decompress.rs (215 lines) - zst_to_csv, read_binary_record
+```
+
+### dusum (multi-file binary)
+```
+src/bin/dusum/
+├── main.rs     (177 lines) - CLI, main processing loop
+├── stats.rs    (191 lines) - UserStats, AgeCfg, age_bucket
+├── aggregate.rs (162 lines) - get_folder_ancestors, resolve_user
+└── output.rs   (217 lines) - write_results, write_unknown_uids
+```
+
+### util (library module)
+```
+src/util/
+├── mod.rs     (20 lines)  - Re-exports for backward compatibility
+├── row.rs     (43 lines)  - Row struct
+├── format.rs  (318 lines) - Human formatting, spinner, progress bar
+├── path.rs    (160 lines) - Path utilities, is_volume_root
+├── csv.rs     (169 lines) - CSV writing utilities, parse_int
+└── platform.rs (165 lines) - Platform-specific filesystem functions
+```
