@@ -49,6 +49,9 @@ struct Args {
     /// Private key file path (required if tls-cert is set)
     #[arg(long, value_name = "FILE", env = "TLS_KEY")]
     tls_key: Option<PathBuf>,
+    /// CORS allowed origin (defaults to CORS_ORIGIN env var or same-origin)
+    #[arg(long, value_name = "URL", env = "CORS_ORIGIN")]
+    cors_origin: Option<String>,
 }
 
 #[tokio::main]
@@ -59,11 +62,10 @@ async fn main() -> Result<()> {
     if std::env::var("JWT_SECRET").is_err() {
         eprintln!(
             "{}",
-            "Warning: JWT_SECRET env var is not set, using default (unsafe)".yellow()
+            "FATAL: JWT_SECRET environment variable is required. Set it before starting duapi."
+                .red()
         );
-        unsafe {
-            std::env::set_var("JWT_SECRET", "1234567890abcdef");
-        }
+        std::process::exit(1);
     }
 
     let args = Args::parse();
@@ -100,13 +102,25 @@ async fn main() -> Result<()> {
     let mut idx = InMemoryFSIndex::new();
     let users = idx.load_from_csv(&csv_path)?;
 
-    FS_INDEX.set(idx).expect("FS_INDEX already set");
-    USERS.set(users).expect("USERS already set");
+    if FS_INDEX.set(idx).is_err() {
+        eprintln!("{}", "FATAL: FS_INDEX already initialized".red());
+        std::process::exit(1);
+    }
+    if USERS.set(users).is_err() {
+        eprintln!("{}", "FATAL: USERS already initialized".red());
+        std::process::exit(1);
+    }
 
-    let cors = CorsLayer::new()
-        .allow_origin(["http://localhost:5173".parse().unwrap()])
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+    let cors = if let Some(ref origin) = args.cors_origin {
+        CorsLayer::new()
+            .allow_origin([origin.parse().unwrap()])
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers(Any)
+    } else {
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers(Any)
+    };
 
     let api = Router::new()
         .route("/login", post(login_handler))

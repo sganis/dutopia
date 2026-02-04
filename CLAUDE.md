@@ -4,104 +4,109 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Dutopia is a high-performance Rust toolkit for filesystem analytics at scale (tested on 1B+ files, 30PB storage). It provides modular CLI tools for scanning, aggregating, and serving filesystem metadata.
+Dutopia is a Rust toolkit for high-scale filesystem analytics. It turns massive filesystems (tested on >1B files, 30PB storage) into fast, filterable, UTF-8-clean analytics via a modular pipeline of CLI binaries, served through a REST API with a Svelte SPA dashboard.
 
-## Build Commands
+## Build & Development Commands
+
+### Rust Backend (rs/)
 
 ```bash
-# Build all Rust binaries
-cd rs && cargo build --release
-
-# Run tests
-cd rs && cargo test
-
-# Run a specific test
-cd rs && cargo test test_name
-
-# Check without building
-cd rs && cargo check
+cd rs
+cargo build --release        # Build all binaries
+cargo test                   # Run all tests
+cargo test test_name         # Run a specific test
+cargo test -- --nocapture    # Run tests with stdout visible
+cargo check                  # Type-check without building
+cargo clippy                 # Lint
 ```
 
-## Frontend (Svelte SPA)
+### Browser Frontend (browser/)
 
 ```bash
 cd browser
-npm install
-npm run dev      # Development server
-npm run build    # Production build
-npm run check    # TypeScript check
+npm install                  # Install dependencies
+npm run dev                  # Dev server on port 5173
+npm run build                # Production build (outputs to build/)
+npm run check                # TypeScript/Svelte type checking
+```
+
+### Running the Full Pipeline
+
+```bash
+./duscan /path -o scan.csv        # 1. Scan filesystem
+./dusum scan.csv -o sum.csv       # 2. Aggregate by folder/user/age
+./duapi sum.csv --port 8000       # 3. Serve REST API + frontend
 ```
 
 ## Architecture
 
-### Rust Binaries (`rs/src/bin/`)
-- **duscan** - Filesystem scanner with multi-threaded traversal, outputs CSV or zstd-compressed binary
-- **duhuman** - Converts machine data (epochs, uids) to human-readable format
-- **dusum** - Aggregates scan output by folder, user, and file-age buckets
-- **duapi** - REST API server (Axum) exposing aggregated data with JWT auth
-- **duzip** - CSV ↔ Zstandard compression utility
-- **dumachine** - Machine data processor
+### Pipeline
 
-### Shared Library (`rs/src/`)
-- `lib.rs` - Re-exports util, auth, storage modules
-- `util.rs` - Path helpers, CSV formatters, progress display, platform-specific filesystem functions
-- `auth.rs` - JWT authentication, platform-specific user verification (PAM on Linux, dscl on macOS)
-- `storage.rs` - Storage abstractions
+```
+filesystem → duscan → [raw CSV] → dusum → [aggregated CSV] → duapi → REST API → Svelte SPA
+                                                                ↑
+                              duzip (optional CSV ↔ .zst compression)
+                              duhuman (optional human-readable conversion)
+```
 
-### Frontend (`browser/`)
-- SvelteKit 5 with TailwindCSS 4
-- Static adapter for deployment alongside the API
+### Binaries (rs/src/bin/)
 
-### Python (`python/`)
-- Legacy `statwalker` package for filesystem walking (Python 2.7)
+Each binary is a directory with focused modules under `rs/src/bin/<name>/`:
 
-## CSV Format
+- **duscan** — Multi-threaded filesystem scanner. Streams metadata as CSV/zstd with 32MB buffer batching.
+- **dusum** — Aggregates raw scan data into rollups by folder, user, and age bucket (0=<60d, 1=60-600d, 2=>600d).
+- **duapi** — Axum REST API with JWT auth, in-memory trie-based filesystem index, optional TLS. Serves the Svelte SPA from `browser/public/`.
+- **duhuman** — Converts machine data (epochs, UIDs, mode bits) to human-readable format. Single-file binary.
+- **duzip** — Bidirectional CSV ↔ Zstandard compression. Single-file binary.
+- **dumachine** — Binary data processor. Single-file binary.
 
-Scanner output columns: `INODE,ATIME,MTIME,UID,GID,MODE,SIZE,DISK,PATH`
-- INODE: `device-inode` format
-- ATIME/MTIME: Unix epoch seconds
-- SIZE: Logical file size
-- DISK: Actual disk usage (blocks × 512)
+### Shared Library (rs/src/)
 
-## Key Patterns
+- `lib.rs` — Re-exports util, auth, storage
+- `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su)
+- `storage.rs` — Cross-platform storage info (Unix: statvfs, Windows: Win32 API)
+- `util/` — Row struct, CSV helpers, human formatting, path utilities, platform-specific filesystem functions
 
-- Multi-threaded scanning via crossbeam channels with work-stealing
-- Shard files per worker, merged at the end
-- Binary output uses zstd compression with little-endian encoding
-- JWT tokens for API authentication with platform-specific credential verification
-- Age buckets: 0=recent (≤60d), 1=mid (≤730d), 2=old (>730d)
+### Frontend (browser/)
+
+SvelteKit 2 + Svelte 5 SPA with Tailwind CSS 4. Uses adapter-static (no SSR).
+
+- `src/routes/+page.svelte` — Main dashboard page
+- `src/lib/` — Extracted components (PascalCase): Login, TreeMap, FolderBar, FileBar, PathStats, AgeFilter, SortDropdown, Tooltip, Picker*
+- `src/ts/` — TypeScript modules (lowercase): api.svelte.ts (API client with $state), cache.ts (IndexedDB, 1min TTL), store.svelte.ts (global state), util.ts (formatting/colors/paths)
+
+### API Endpoints
+
+```
+POST /api/login                         # Returns JWT
+GET  /api/users                         # List usernames
+GET  /api/folders?path=&users=&age=     # Folder statistics
+GET  /api/files?path=&users=&age=       # File listing
+```
+
+### CSV Format (scanner output)
+
+```
+INODE,ATIME,MTIME,UID,GID,MODE,SIZE,DISK,PATH
+```
+
+## Platform-Specific Code
+
+Uses `#[cfg(...)]` conditional compilation throughout. Key differences:
+- **Auth**: macOS uses `dscl`, Linux uses `su`, Windows uses env-var fake auth
+- **Storage**: Unix uses `statvfs`/`getmntinfo`, Windows uses `GetDiskFreeSpaceExW`
+- **Scanning**: Unix uses `as_os_str().as_bytes()` for zero-copy path handling
 
 ## Environment Variables
 
-- `JWT_SECRET` - Required for API authentication
-- `ADMIN_GROUP` - Comma-separated list of admin usernames
-- `STATIC_DIR` - Path to frontend static files
-- `PORT` - API server port (default: 8080)
-- `TLS_CERT`/`TLS_KEY` - HTTPS certificate paths
+- `JWT_SECRET` — Secret for JWT token signing (duapi)
+- `ADMIN_GROUP` — Optional admin group check (duapi)
 
----
+## CI/CD
 
-## Improvement Plan
+GitHub Actions on push to master (Ubuntu only). Runs `cargo test -r` and `npm run build`. Auto-bumps patch version via cargo-edit on release.
 
-### Completed
+## Constraints
 
-| Task | Status |
-|------|--------|
-| UID→username caching in duapi | ✅ Done (`item.rs:37-44`) |
-| Refactor duscan.rs (2,179 lines) | ✅ Done: 5 modules (main, worker, csv, merge, row) |
-| Refactor duapi.rs (1,043 lines) | ✅ Done: 5 modules (main, handler, index, item, query) |
-| Refactor util.rs (1,051 lines) | ✅ Done: 5 modules (mod, row, format, path, csv, platform) |
-| Refactor duzip.rs (958 lines) | ✅ Done: 4 modules (main, record, compress, decompress) |
-| Refactor dusum.rs (798 lines) | ✅ Done: 4 modules (main, stats, aggregate, output) |
-| Refactor +page.svelte (1,079 lines) | ✅ Done: 6 components (Tooltip, AgeFilter, SortDropdown, FolderBar, FileBar, PathStats) → 726 lines |
-| File headers on all source files | ✅ Done |
-
-### Remaining Refactoring
-
-All refactoring complete. No files exceed the 600-line limit.
-
-### Not Recommended (Over-engineering)
-
-- External merge sort for duscan: Only needed for >1GB sorted output (rare)
-- Async username resolution: Would complicate code for minimal gain
-- Frontend state management library: Svelte 5 runes are sufficient
+- Do not run `git commit` — commits are handled externally.
+- Follow the Vibe Coding Standards from the user's global CLAUDE.md (file headers with paths, 300-500 line target, 600 line hard limit, naming conventions).

@@ -30,9 +30,9 @@
 
         const resp = await fetch(url, {
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json', 
-                'Accept': 'application/json' 
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
             },
             body: JSON.stringify({ username, password }),
         });
@@ -53,7 +53,7 @@
             State.username  = claims?.sub || username;
             State.isAdmin  = !!claims?.is_admin;
             State.token     = token;
-            //State.expires_at = expires_at;
+            State.expiresAt = expires_at;
 
             localStorage.setItem('state', JSON.stringify(State));
 
@@ -74,7 +74,7 @@
 
 </script>
 
-<div in:fade={{ duration: 500 }} 
+<div in:fade={{ duration: 500 }}
     class="flex flex-col gap-4 justify-center items-center h-full text-white">
     <div class="flex w-full">
         {#each getOptimalColors(30) as color}
@@ -88,30 +88,30 @@
             <form class="space-y-4 w-full" onsubmit={onSubmit}>
                 <div>
                     <label class="block text-sm font-medium" for="username">Username</label>
-                    <input 
+                    <input
                         bind:value={username}
-                        class="w-full" 
-                        id="username" 
+                        class="w-full"
+                        id="username"
                         placeholder="Linux user"
-                        type="text" 
-                        required 
+                        type="text"
+                        required
                         disabled={working}
                     />
                 </div>
                 <div>
                     <label class="block text-sm font-medium " for="password">Password</label>
-                    <input 
+                    <input
                         bind:value={password}
-                        class="w-full" 
-                        id="password" 
+                        class="w-full"
+                        id="password"
                         placeholder="Linux password"
-                        type="password" 
-                        required 
+                        type="password"
+                        required
                         disabled={working}
                     />
                 </div>
-                <div class="flex items-right justify-end">            
-                    <button 
+                <div class="flex items-right justify-end">
+                    <button
                         class="btn w-full"
                         type="submit"
                         disabled={working}
@@ -123,11 +123,11 @@
                         {/if}
                     </button>
                 </div>
-            </form>        
-        </div>        
+            </form>
+        </div>
     </div>
     {#if error}
         <p class="w-1/2 bg-red-100 text-red-700 p-2 rounded text-sm text-center">{error}</p>
-    {/if}        
+    {/if}
     <div class="grow"></div>
 </div>

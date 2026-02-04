@@ -301,10 +301,17 @@ fn main() -> Result<()> {
     // ---- gather stats ----
     let mut total = Stats::default();
     for j in joins {
-        let s = j.join().expect("worker panicked");
-        total.files += s.files;
-        total.errors += s.errors;
-        total.bytes += s.bytes;
+        match j.join() {
+            Ok(s) => {
+                total.files += s.files;
+                total.errors += s.errors;
+                total.bytes += s.bytes;
+            }
+            Err(_) => {
+                eprintln!("{}", "Error: a worker thread panicked".red());
+                total.errors += 1;
+            }
+        }
     }
     // measure speed before merging
     let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
@@ -312,8 +319,7 @@ fn main() -> Result<()> {
 
     // ---- merge shards ----
     let sort_csv = args.no_atime && matches!(out_fmt, OutputFormat::Csv);
-    merge_shards(&out_dir, &final_path, workers, out_fmt, sort_csv, pid)
-        .expect("merge shards failed");
+    merge_shards(&out_dir, &final_path, workers, out_fmt, sort_csv, pid)?;
 
     if let Some(h) = reporter_join.take() {
         reporting_done.store(true, Relaxed);

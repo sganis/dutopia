@@ -1,4 +1,6 @@
 // browser/src/ts/store.svelte.ts
+import { clearAll } from './cache';
+
 export const API_URL = `${import.meta.env.VITE_PUBLIC_BASE_URL}api`;
 
 export const initialState = {
@@ -18,7 +20,7 @@ export const State = $state({
   expiresAt: appState.expiresAt,
   logout: () => {
     Object.assign(State, initialState);
-    try { 
-      localStorage.removeItem("state"); } catch {}
-    }
+    try { localStorage.removeItem("state"); } catch {}
+    clearAll().catch(() => {});
+  }
 })

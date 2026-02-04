@@ -4,10 +4,11 @@
   import logo from '../assets/disk_usage.svg';
   import Login from '../lib/Login.svelte';
   import { State } from '../ts/store.svelte';
+  import { clearAll } from '../ts/cache';
 
   let { children } = $props()
   let authed = $derived(
-      Boolean(State.token) 
+      Boolean(State.token)
     && (!State.expiresAt || Date.now() < State.expiresAt)
   )
 
@@ -16,8 +17,9 @@
   });
 
   function logout() {
-    State.logout()
+    State.logout();
     localStorage.removeItem('state');
+    clearAll().catch(() => {});
   }
 
   function onLogout() {
@@ -42,7 +44,7 @@
         {#if State.isAdmin}
           <span class="px-2 py-1 rounded bg-emerald-600 text-white">Admin</span>
         {/if}
-        <button class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600" 
+        <button class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600"
           onclick={onLogout}>
           Logout
         </button>

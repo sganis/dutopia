@@ -26,6 +26,14 @@ export const humanCount = (n, maxFrac = 1, locale = 'en') =>
   new Intl.NumberFormat(locale, { notation: 'compact', compactDisplay: 'short', maximumFractionDigits: maxFrac }).format(n);
 // compact(1234) -> "1.2K"
 
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 export function getParent(inputPath) {
   if (!inputPath || typeof inputPath !== 'string') {
@@ -33,13 +41,13 @@ export function getParent(inputPath) {
   }
 
   let s = inputPath.trim();
-  
+
   // Normalize separators - convert all to forward slashes for processing
   s = s.replace(/\\/g, '/');
-  
+
   // Detect if this is a Windows path (has drive letter)
   const isWindows = /^[a-zA-Z]:/.test(s);
-  
+
   // Handle Windows drive root cases
   if (isWindows) {
     // "C:" -> "C:/"
@@ -56,37 +64,37 @@ export function getParent(inputPath) {
       return '/';
     }
   }
-  
+
   // Remove trailing slashes
   s = s.replace(/\/+$/, '');
-  
+
   // Split by forward slash (already normalized)
   const parts = s.split('/');
-  
+
   if (parts.length <= 1) {
     return '.';
   }
-  
+
   // Remove the last part
   parts.pop();
-  
+
   let parent = parts.join('/');
-  
+
   // Handle Windows drive roots - ensure they end with backslash
   if (isWindows && /^[a-zA-Z]:$/.test(parent)) {
     parent += '/';
   }
-  
+
   // Handle empty parent (shouldn't happen with proper paths)
   if (!parent) {
     return isWindows ? 'C:\\' : '/';
   }
-  
+
   // Convert back to appropriate separators
   if (isWindows) {
     parent = parent.replace(/\//g, '\\');
   }
-  
+
   return parent;
 }
 
@@ -154,47 +162,47 @@ export const getOptimalColors = (numUsers) => {
   if (numUsers === 1) {
     return [COLORS[0]]; // Single vibrant color
   }
-  
+
   if (numUsers === 2) {
     return [COLORS[0], COLORS[2]]; // Red and Blue - maximum contrast
   }
-  
+
   if (numUsers === 3) {
     return [COLORS[0], COLORS[1], COLORS[2]]; // Red, Green, Blue
   }
-  
+
   if (numUsers <= 8) {
     // Use tier 1 colors for optimal distinction
     return COLORS.slice(0, numUsers);
   }
-  
+
   if (numUsers <= 16) {
     // Mix tier 1 and tier 2
     return COLORS.slice(0, numUsers);
   }
-  
+
   if (numUsers <= 24) {
     // Use first 24 colors
     return COLORS.slice(0, numUsers);
   }
-  
+
   // For more than 24 users, cycle through with slight variations
   const colors = [];
   for (let i = 0; i < numUsers; i++) {
     const baseIndex = i % COLORS.length;
     const cycle = Math.floor(i / COLORS.length);
     let color = COLORS[baseIndex];
-    
+
     // Apply slight modifications for cycles
     if (cycle > 0) {
       const hsl = hexToHsl(color);
       hsl.l = Math.max(0.2, Math.min(0.8, hsl.l + (cycle * 0.15 * (i % 2 === 0 ? 1 : -1))));
       color = hslToHex(hsl);
     }
-    
+
     colors.push(color);
   }
-  
+
   return colors;
 }
 
@@ -203,11 +211,11 @@ const hexToHsl = (hex) => {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
   const g = parseInt(hex.slice(3, 5), 16) / 255;
   const b = parseInt(hex.slice(5, 7), 16) / 255;
-  
+
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
   let h, s, l = (max + min) / 2;
-  
+
   if (max === min) {
     h = s = 0;
   } else {
@@ -220,7 +228,7 @@ const hexToHsl = (hex) => {
     }
     h /= 6;
   }
-  
+
   return { h, s, l };
 }
 
@@ -233,12 +241,12 @@ const hslToHex = ({ h, s, l }) => {
     if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
     return p;
   };
-  
+
   const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
   const p = 2 * l - q;
   const r = hue2rgb(p, q, h + 1/3);
   const g = hue2rgb(p, q, h);
   const b = hue2rgb(p, q, h - 1/3);
-  
+
   return `#${Math.round(r * 255).toString(16).padStart(2, '0')}${Math.round(g * 255).toString(16).padStart(2, '0')}${Math.round(b * 255).toString(16).padStart(2, '0')}`;
 }

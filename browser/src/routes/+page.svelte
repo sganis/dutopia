@@ -2,7 +2,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
-  import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS } from "../ts/util";
+  import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS, escapeHtml } from "../ts/util";
   import { api } from "../ts/api.svelte";
   import { API_URL, State } from "../ts/store.svelte";
   import Svelecte, { addRenderer } from "svelecte";
@@ -112,7 +112,7 @@
                 <div class="border border-gray-500 rounded"
                     style="${icon_base} background: ${icon_bg};">
                 </div>
-                <div class="${user_css}">${item.user}</div>
+                <div class="${user_css}">${escapeHtml(item.user)}</div>
             </div>`;
   }
   addRenderer("color", colorRenderer);

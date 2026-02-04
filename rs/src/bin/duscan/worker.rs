@@ -29,7 +29,6 @@ pub struct FileItem {
     pub md: fs::Metadata,
 }
 
-#[derive(Debug)]
 pub enum Task {
     Dir(PathBuf),
     Files {
@@ -37,6 +36,20 @@ pub enum Task {
         items: Vec<FileItem>,
     },
     Shutdown,
+}
+
+impl std::fmt::Debug for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Task::Dir(p) => f.debug_tuple("Dir").field(p).finish(),
+            Task::Files { base, items } => f
+                .debug_struct("Files")
+                .field("base", base)
+                .field("items", items)
+                .finish(),
+            Task::Shutdown => write!(f, "Shutdown"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -68,14 +81,34 @@ pub fn worker(
     let hostname = get_hostname();
     let pid = cfg.pid;
     let shard_path = out_dir.join(format!("shard_{hostname}_{pid}_{tid}.tmp"));
-    let file = File::create(&shard_path).expect("open shard");
+    let file = match File::create(&shard_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "FATAL: cannot create shard file {}: {}",
+                shard_path.display(),
+                e
+            );
+            let mut stats = Stats::default();
+            stats.errors += 1;
+            return stats;
+        }
+    };
     let base = BufWriter::with_capacity(32 * 1024 * 1024, file);
     let has_progress = cfg.progress.is_some();
     let progress = cfg.progress.unwrap_or_default();
     let verbose = cfg.verbose;
 
     let mut writer: Box<dyn Write + Send> = if is_bin {
-        let enc = ZstdEncoder::new(base, 1).expect("zstd encoder");
+        let enc = match ZstdEncoder::new(base, 1) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("FATAL: cannot create zstd encoder: {}", e);
+                let mut stats = Stats::default();
+                stats.errors += 1;
+                return stats;
+            }
+        };
         Box::new(enc.auto_finish())
     } else {
         Box::new(base)
@@ -115,7 +148,12 @@ pub fn worker(
                 }
 
                 if buf.len() >= FLUSH_BYTES {
-                    let _ = writer.write_all(&buf);
+                    if let Err(e) = writer.write_all(&buf) {
+                        if verbose >= 1 {
+                            eprintln!("ERROR: write failed: {}", e);
+                        }
+                        stats.errors += 1;
+                    }
                     buf.clear();
                 }
 
@@ -151,7 +189,12 @@ pub fn worker(
                     stats.bytes += row.blocks * 512;
                     files += 1;
                     if buf.len() >= FLUSH_BYTES {
-                        let _ = writer.write_all(&buf);
+                        if let Err(e) = writer.write_all(&buf) {
+                            if verbose >= 1 {
+                                eprintln!("ERROR: write failed: {}", e);
+                            }
+                            stats.errors += 1;
+                        }
                         buf.clear();
                     }
                 }
@@ -164,9 +207,19 @@ pub fn worker(
     }
 
     if !buf.is_empty() {
-        let _ = writer.write_all(&buf);
+        if let Err(e) = writer.write_all(&buf) {
+            if verbose >= 1 {
+                eprintln!("ERROR: final write failed: {}", e);
+            }
+            stats.errors += 1;
+        }
     }
-    let _ = writer.flush();
+    if let Err(e) = writer.flush() {
+        if verbose >= 1 {
+            eprintln!("ERROR: flush failed: {}", e);
+        }
+        stats.errors += 1;
+    }
 
     stats
 }
