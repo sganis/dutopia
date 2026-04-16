@@ -47,10 +47,6 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Remove package-lock.json (browser/)
-        working-directory: browser
-        run: rm -f package-lock.json
-
       - name: Install deps (browser/)
         working-directory: browser
         run: npm install
@@ -62,14 +58,14 @@ jobs:
       - name: Upload Rust artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: statwaker-${{ matrix.os }}-rust
+          name: dutopia-${{ matrix.os }}-rust
           path: rs/target/**
           if-no-files-found: error
 
       - name: Upload Svelte artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: statwaker-${{ matrix.os }}-browser
+          name: dutopia-${{ matrix.os }}-browser
           path: browser/build/**
           if-no-files-found: warn
 

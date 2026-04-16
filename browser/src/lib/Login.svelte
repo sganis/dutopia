@@ -46,7 +46,6 @@
                 return;
             }
             const claims = parseJwt(token)
-            console.log('claims:', claims)
             const expires_at = claims?.exp ? claims.exp * 1000 : null;
 
             // update app state

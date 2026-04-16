@@ -178,7 +178,7 @@ pub mod platform {
     // Verify user credentials using the su command
     /// Returns true if authentication succeeds, false otherwise
     pub fn verify_user(username: &str, password: &str) -> bool {
-        println!("vefirying user: {}", username);
+        println!("verifying user: {}", username);
         let mut child = match Command::new("su")
             .arg(username)
             .arg("-c")
@@ -190,7 +190,7 @@ pub mod platform {
         {
             Ok(child) => child,
             Err(e) => {
-                println!("vefiry user failed: {}: {:?}", username, e);
+                println!("verify user failed: {}: {:?}", username, e);
                 return false;                 
             }
         };

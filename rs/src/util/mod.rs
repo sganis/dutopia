@@ -2,6 +2,7 @@
 
 mod csv;
 mod format;
+pub mod logging;
 mod path;
 mod platform;
 mod row;

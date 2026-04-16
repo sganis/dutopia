@@ -430,10 +430,8 @@
     try {
       const userFilter: string[] = selectedUser === "All Users" ? [] : [selectedUser];
       const raw: RawFolder[] = await api.getFolders(_p, userFilter, ageFilter);
-      console.log("Raw folders:", raw);
       folders = transformFolders(raw, ageFilter);
       files = await api.getFiles(_p, userFilter, ageFilter);
-      console.log("Files:", files);
     } finally {
       loading = false;
     }
@@ -484,7 +482,6 @@
   }
 
   function onUserChanged() {
-    console.log("selected user:", selectedUser);
     selectedUserColor = userColors.get(selectedUser) ?? "#000000";
     refresh();
   }
@@ -552,11 +549,8 @@
   //#endregion
 
   onMount(async () => {
-    console.log("api url:", API_URL);
     users = await api.getUsers();
-    console.log("Users:", $state.snapshot(users));
     allColors = getOptimalColors(users.length);
-    console.log("Colors:", allColors);
     createUserDropdown(users);
 
     if (State.isAdmin) {
@@ -712,6 +706,19 @@
 </div>
 
 <Tooltip {tip} />
+
+{#if api.error}
+  <div
+    class="fixed bottom-4 inset-x-0 mx-auto w-max max-w-lg bg-red-600 text-white px-5 py-2
+      rounded-lg font-medium shadow-lg z-50 flex items-center gap-3"
+  >
+    <span class="material-symbols-outlined text-lg">error</span>
+    <span>{api.error}</span>
+    <button class="ml-2 opacity-70 hover:opacity-100" onclick={() => { api.error = ''; }}>
+      <span class="material-symbols-outlined text-sm">close</span>
+    </button>
+  </div>
+{/if}
 
 {#if copyFeedbackVisible}
   <div

@@ -15,6 +15,7 @@ use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
+use dutopia::util::logging::init_tracing;
 use dutopia::util::print_about;
 
 mod handler;
@@ -22,7 +23,7 @@ mod index;
 mod item;
 mod query;
 
-use handler::{get_files_handler, get_folders_handler, login_handler, users_handler};
+use handler::{get_files_handler, get_folders_handler, health_handler, login_handler, users_handler};
 use index::InMemoryFSIndex;
 
 static FS_INDEX: OnceLock<InMemoryFSIndex> = OnceLock::new();
@@ -57,6 +58,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     print_about();
+    init_tracing("duapi");
 
     dotenvy::dotenv().ok();
     if std::env::var("JWT_SECRET").is_err() {
@@ -123,6 +125,7 @@ async fn main() -> Result<()> {
     };
 
     let api = Router::new()
+        .route("/health", get(health_handler))
         .route("/login", post(login_handler))
         .route("/users", get(users_handler))
         .route("/folders", get(get_folders_handler))

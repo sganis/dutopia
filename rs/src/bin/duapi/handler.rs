@@ -15,6 +15,11 @@ use crate::item::get_items;
 use crate::query::{parse_users_csv, FilesQuery, FolderQuery};
 use crate::{get_fs_index, get_users};
 
+/// GET /api/health
+pub async fn health_handler() -> impl IntoResponse {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
 /// POST /api/login
 pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
     if payload.username.is_empty() || payload.password.is_empty() {
@@ -44,7 +49,7 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
         is_admin: admins.contains(&payload.username.trim().to_ascii_lowercase()),
         exp: exp.try_into().unwrap(),
     };
-    println!("login success: {:?}", &claims);
+    tracing::info!(user = %claims.sub, is_admin = claims.is_admin, "login success");
 
     let token = encode(&Header::default(), &claims, &keys().encoding)
         .map_err(|_| AuthError::TokenCreation)?;
@@ -56,11 +61,11 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
 pub async fn users_handler(claims: Claims) -> impl IntoResponse {
     if claims.is_admin {
         let users = get_users().clone();
-        println!("200 OK /api/users count={}", users.len());
+        tracing::info!(count = users.len(), "200 OK /api/users");
         Json(users)
     } else {
         let me = vec![claims.sub.clone()];
-        println!("200 OK /api/users self={:?}", me);
+        tracing::info!(user = %claims.sub, "200 OK /api/users (self)");
         Json(me)
     }
 }
@@ -85,9 +90,10 @@ pub async fn get_folders_handler(
 
     if !claims.is_admin {
         if requested.is_empty() || requested.len() != 1 || requested[0] != claims.sub {
-            println!(
-                "403 Forbidden /api/folders path={} requested_users={:?}",
-                path, requested
+            tracing::warn!(
+                path = %path,
+                requested_users = ?requested,
+                "403 Forbidden /api/folders"
             );
             return AuthError::Forbidden.into_response();
         }
@@ -96,14 +102,11 @@ pub async fn get_folders_handler(
     let index = get_fs_index();
     let items = match index.list_children(&path, &requested, q.age) {
         Ok(v) => {
-            println!("200 OK /api/folders path={} items={}", path, v.len());
+            tracing::info!(path = %path, items = v.len(), "200 OK /api/folders");
             v
         }
         Err(e) => {
-            println!(
-                "list_children ERROR /api/folders path={} err={}",
-                path, e
-            );
+            tracing::warn!(path = %path, err = %e, "list_children ERROR /api/folders");
             Vec::new()
         }
     };
@@ -116,7 +119,7 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
     let folder = match q.path.as_deref() {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => {
-            println!("400 Bad Request /api/files missing 'path'");
+            tracing::warn!("400 Bad Request /api/files missing 'path'");
             return (StatusCode::BAD_REQUEST, "missing 'path' query parameter").into_response();
         }
     };
@@ -128,9 +131,10 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
 
     if !claims.is_admin {
         if requested.is_empty() || requested.len() != 1 || requested[0] != claims.sub {
-            println!(
-                "403 Forbidden /api/files path={} requested_users={:?}",
-                folder, requested
+            tracing::warn!(
+                path = %folder,
+                requested_users = ?requested,
+                "403 Forbidden /api/files"
             );
             return AuthError::Forbidden.into_response();
         }
@@ -142,7 +146,7 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
 
     match fut.await {
         Err(join_err) => {
-            println!("500 Task Join Error /api/files err={join_err}");
+            tracing::error!(err = %join_err, "500 Task Join Error /api/files");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("task error: {join_err}"),
@@ -152,17 +156,17 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
         Ok(Err(e)) => {
             #[cfg(not(unix))]
             {
-                println!("501 Not Implemented /api/files err={}", e);
+                tracing::warn!(err = %e, "501 Not Implemented /api/files");
                 (StatusCode::NOT_IMPLEMENTED, e.to_string()).into_response()
             }
             #[cfg(unix)]
             {
-                println!("400 Bad Request /api/files err={}", e);
+                tracing::warn!(err = %e, "400 Bad Request /api/files");
                 (StatusCode::BAD_REQUEST, e.to_string()).into_response()
             }
         }
         Ok(Ok(items)) => {
-            println!("200 OK /api/files items={}", items.len());
+            tracing::info!(items = items.len(), "200 OK /api/files");
             Json(items).into_response()
         }
     }
@@ -396,5 +400,14 @@ mod tests {
             .unwrap();
         let alice_ages = docs2.users.get("alice").unwrap();
         assert!(alice_ages.contains_key("2"));
+    }
+
+    #[tokio::test]
+    async fn test_health_handler() {
+        let resp = health_handler().await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "ok");
     }
 }

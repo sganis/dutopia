@@ -6,7 +6,6 @@ use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
 
 use crate::compress::{READ_BUF_SIZE, WRITE_BUF_SIZE};
-use crate::record::BinaryRecord;
 
 pub fn zst_to_csv(input: &PathBuf, output: Option<&PathBuf>) -> Result<()> {
     let start = std::time::Instant::now();
@@ -195,6 +194,10 @@ fn read_u32_le_opt<R: Read>(r: &mut R) -> Result<Option<u32>> {
     }
 }
 
+#[cfg(test)]
+use crate::record::BinaryRecord;
+
+#[cfg(test)]
 pub fn read_binary_record<R: Read>(r: &mut R) -> Result<Option<BinaryRecord>> {
     let path_len = match read_u32_le_opt(r)? {
         None => return Ok(None),

@@ -12,10 +12,6 @@
     && (!State.expiresAt || Date.now() < State.expiresAt)
   )
 
-  $effect(() => {
-    authed = Boolean(State.token) && (!State.expiresAt || Date.now() < State.expiresAt);
-  });
-
   function logout() {
     State.logout();
     localStorage.removeItem('state');
