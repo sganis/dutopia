@@ -75,13 +75,14 @@ pub async fn get_folders_handler(
     claims: Claims,
     Query(q): Query<FolderQuery>,
 ) -> impl IntoResponse {
-    let mut path = q.path.unwrap_or_else(|| "/".to_string());
-    if path.is_empty() {
-        path = "/".to_string();
-    }
-    if !path.starts_with('/') {
-        path = format!("/{}", path);
-    }
+    let raw_path = q.path.unwrap_or_default();
+    let path = match crate::query::normalize_path(&raw_path) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(input = %raw_path, "400 Bad Request /api/folders rejected path");
+            return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+        }
+    };
 
     let requested: Vec<String> = match q.users.as_deref() {
         Some(s) if !s.trim().is_empty() => parse_users_csv(s),
@@ -101,7 +102,12 @@ pub async fn get_folders_handler(
 
     let index = get_fs_index();
     let items = match index.list_children(&path, &requested, q.age) {
-        Ok(v) => {
+        Ok(mut v) => {
+            let cap = crate::query::max_page_size();
+            if v.len() > cap {
+                tracing::warn!(path = %path, total = v.len(), cap, "/api/folders truncated");
+                v.truncate(cap);
+            }
             tracing::info!(path = %path, items = v.len(), "200 OK /api/folders");
             v
         }
@@ -117,11 +123,25 @@ pub async fn get_folders_handler(
 /// GET /api/files?path=/some/dir&users=alice,bob&age=1
 pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> impl IntoResponse {
     let folder = match q.path.as_deref() {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => {
+        None => {
             tracing::warn!("400 Bad Request /api/files missing 'path'");
             return (StatusCode::BAD_REQUEST, "missing 'path' query parameter").into_response();
         }
+        Some(raw) => match crate::query::normalize_path(raw) {
+            None => {
+                tracing::warn!(input = %raw, "400 Bad Request /api/files rejected path");
+                return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+            }
+            Some(p) if p == "/" => {
+                tracing::warn!("400 Bad Request /api/files path '/' not allowed");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "path '/' not allowed for /api/files",
+                )
+                    .into_response();
+            }
+            Some(p) => p,
+        },
     };
 
     let requested: Vec<String> = match q.users.as_deref() {
@@ -165,7 +185,12 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 (StatusCode::BAD_REQUEST, e.to_string()).into_response()
             }
         }
-        Ok(Ok(items)) => {
+        Ok(Ok(mut items)) => {
+            let cap = crate::query::max_page_size();
+            if items.len() > cap {
+                tracing::warn!(total = items.len(), cap, "/api/files truncated");
+                items.truncate(cap);
+            }
             tracing::info!(items = items.len(), "200 OK /api/files");
             Json(items).into_response()
         }
@@ -310,6 +335,38 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn test_get_folders_handler_rejects_traversal() {
+        let claims = Claims {
+            sub: "root".into(),
+            is_admin: true,
+            exp: 9_999_999_999usize,
+        };
+        let q = FolderQuery {
+            path: Some("/var/../etc/passwd".into()),
+            users: None,
+            age: None,
+        };
+        let resp = get_folders_handler(claims, Query(q)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_files_handler_rejects_traversal() {
+        let claims = Claims {
+            sub: "root".into(),
+            is_admin: true,
+            exp: 9_999_999_999usize,
+        };
+        let q = FilesQuery {
+            path: Some("/var/../etc/passwd".into()),
+            users: None,
+            age: None,
+        };
+        let resp = get_files_handler(claims, Query(q)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_get_files_handler_unix_admin_ok() {
@@ -409,5 +466,29 @@ mod tests {
         let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["status"], "ok");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_get_folders_handler_clamps_to_max_page_size() {
+        init_index_once();
+        // SAFETY: we set then restore for test isolation.
+        unsafe { std::env::set_var("MAX_PAGE_SIZE", "1") };
+        let admin = Claims {
+            sub: "root".into(),
+            is_admin: true,
+            exp: 9_999_999_999usize,
+        };
+        let q = FolderQuery {
+            path: Some("/".into()),
+            users: None,
+            age: None,
+        };
+        let resp = get_folders_handler(admin, Query(q)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+        let arr: Vec<FolderOut> = serde_json::from_slice(&body).unwrap();
+        assert!(arr.len() <= 1);
+        unsafe { std::env::remove_var("MAX_PAGE_SIZE") };
     }
 }

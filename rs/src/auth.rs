@@ -158,12 +158,12 @@ pub mod platform {
                 if status.success() {
                     true
                 } else {
-                    println!("dscl . -authonly {} ******** exit status: {:?}", username, status);
+                    tracing::warn!(user = %username, code = ?status.code(), "verify_user: dscl exited non-zero");
                     false
                 }
             },
             Err(e) => {
-                println!("error in command: dscl . -authonly {} ********: {:?}", username, e);                
+                tracing::warn!(user = %username, error = %e, "verify_user: failed to spawn dscl");
                 false
             }
         }
@@ -175,51 +175,46 @@ pub mod platform {
     use std::process::{Command, Stdio};
     use std::io::Write;
 
-    // Verify user credentials using the su command
-    /// Returns true if authentication succeeds, false otherwise
+    /// Verify user credentials using the `su` command.
+    /// Returns true if authentication succeeds, false otherwise.
+    /// NOTE: passwords are written to su's stdin; they are NEVER logged.
     pub fn verify_user(username: &str, password: &str) -> bool {
-        println!("verifying user: {}", username);
+        tracing::debug!(user = %username, "verify_user: spawning su");
         let mut child = match Command::new("su")
             .arg(username)
             .arg("-c")
-            .arg("true") // Just run the 'true' command if auth succeeds
+            .arg("true")
             .stdin(Stdio::piped())
-            .stdout(Stdio::null()) // Suppress output
-            .stderr(Stdio::null()) // Suppress error messages
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
         {
             Ok(child) => child,
             Err(e) => {
-                println!("verify user failed: {}: {:?}", username, e);
-                return false;                 
+                tracing::warn!(user = %username, error = %e, "verify_user: failed to spawn su");
+                return false;
             }
         };
 
-        // Send the password to su's stdin
         if let Some(mut stdin) = child.stdin.take() {
-            if writeln!(stdin, "{}", password).is_err() {
-                println!("error sending string to stdin");                
+            if let Err(e) = writeln!(stdin, "{}", password) {
+                tracing::warn!(user = %username, error = %e, "verify_user: failed to write password to su stdin");
                 return false;
             }
         }
 
-        // Wait for su to complete and check exit status
         match child.wait() {
+            Ok(status) if status.success() => true,
             Ok(status) => {
-                if status.success() {
-                    true
-                } else {
-                    println!("su {} -c true command exit status: {:?}", username, status);
-                    false
-                }
-            },
+                tracing::warn!(user = %username, code = ?status.code(), "verify_user: su exited non-zero");
+                false
+            }
             Err(e) => {
-                println!("error waiting for su {} -c true command: {:?}", username, e);                
+                tracing::warn!(user = %username, error = %e, "verify_user: failed waiting for su");
                 false
             }
         }
     }
-
 }
 
 #[cfg(windows)]
@@ -231,6 +226,19 @@ pub mod platform {
         let expected_user = env::var("FAKE_USER").unwrap_or_else(|_| "admin".to_string());
         let expected_pass = env::var("FAKE_PASSWORD").unwrap_or_else(|_| "admin".to_string());
         username == expected_user && password == expected_pass
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests {
+    use super::platform::verify_user;
+
+    #[test]
+    fn test_verify_user_rejects_garbage() {
+        // su will fail for a non-existent user; we just want to confirm the function
+        // returns `false` rather than panicking after the println! → tracing migration.
+        assert!(!verify_user("definitely_not_a_real_user_xyz", "wrong"));
     }
 }
 

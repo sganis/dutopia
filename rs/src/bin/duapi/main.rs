@@ -10,10 +10,14 @@ use clap::{ColorChoice, Parser};
 use colored::Colorize;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::timeout::TimeoutLayer;
 
 use dutopia::util::logging::init_tracing;
 use dutopia::util::print_about;
@@ -22,6 +26,7 @@ mod handler;
 mod index;
 mod item;
 mod query;
+mod shutdown;
 
 use handler::{get_files_handler, get_folders_handler, health_handler, login_handler, users_handler};
 use index::InMemoryFSIndex;
@@ -114,8 +119,15 @@ async fn main() -> Result<()> {
     }
 
     let cors = if let Some(ref origin) = args.cors_origin {
+        let header = match parse_cors_origin(origin) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("{}", format!("FATAL: {e}").red());
+                std::process::exit(1);
+            }
+        };
         CorsLayer::new()
-            .allow_origin([origin.parse().unwrap()])
+            .allow_origin(header)
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers(Any)
     } else {
@@ -134,10 +146,40 @@ async fn main() -> Result<()> {
     let frontend = ServeDir::new(&static_dir)
         .not_found_service(ServeFile::new(format!("{}/index.html", static_dir)));
 
+    let timeout_secs = env_u64("REQUEST_TIMEOUT_SECS", 30);
+    let body_limit_bytes = env_u64("MAX_BODY_BYTES", 64 * 1024) as usize;
+    tracing::info!(timeout_secs, body_limit_bytes, "request limits configured");
+
+    let rate_per_min = env_u64("RATE_LIMIT_PER_MIN", 300);
+    let per_sec = (rate_per_min / 60).max(1);
+    let burst = (rate_per_min / 6).max(5) as u32; // ~10s burst window
+    let governor_conf = match GovernorConfigBuilder::default()
+        .per_second(per_sec)
+        .burst_size(burst)
+        .finish()
+    {
+        Some(c) => Arc::new(c),
+        None => {
+            eprintln!(
+                "{}",
+                format!("FATAL: invalid rate limit (per_sec={per_sec}, burst={burst})").red()
+            );
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(per_sec, burst, "rate limiter configured");
+    let governor_layer = GovernorLayer { config: governor_conf };
+
     let app = Router::new()
         .nest("/api", api)
         .fallback_service(frontend)
-        .layer(cors);
+        .layer(cors)
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(timeout_secs),
+        ))
+        .layer(RequestBodyLimitLayer::new(body_limit_bytes))
+        .layer(governor_layer);
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
@@ -169,13 +211,27 @@ async fn main() -> Result<()> {
                 .context("Failed to load TLS certificate/key")?;
 
             println!("Serving on https://{addr}  (static dir: {static_dir})");
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                shutdown::shutdown_signal().await;
+                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
+            });
+
             axum_server::bind_rustls(addr, config)
-                .serve(app.into_make_service())
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await?;
         }
         (None, None) => {
             println!("Serving on http://{addr}  (static dir: {static_dir})");
-            axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown::shutdown_signal())
+            .await?;
         }
         _ => {
             eprintln!(
@@ -187,6 +243,27 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse a CORS origin string into the `HeaderValue` that `tower_http`'s `CorsLayer` requires.
+fn parse_cors_origin(s: &str) -> Result<axum::http::HeaderValue, anyhow::Error> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("CORS_ORIGIN is empty");
+    }
+    if trimmed.contains(char::is_whitespace) || !trimmed.contains("://") {
+        anyhow::bail!("invalid CORS_ORIGIN value: {trimmed:?}");
+    }
+    trimmed
+        .parse::<axum::http::HeaderValue>()
+        .with_context(|| format!("invalid CORS_ORIGIN value: {trimmed:?}"))
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 pub fn is_port_taken(port: u16) -> bool {
@@ -232,5 +309,27 @@ mod tests {
     fn test_is_port_taken_unlikely() {
         // Port 65432 is unlikely to be in use
         assert!(!is_port_taken(65432));
+    }
+
+    #[test]
+    fn test_parse_cors_origin_valid() {
+        let v = parse_cors_origin("http://localhost:5173").expect("parse ok");
+        assert_eq!(v.to_str().unwrap(), "http://localhost:5173");
+    }
+
+    #[test]
+    fn test_parse_cors_origin_invalid() {
+        assert!(parse_cors_origin("not a url").is_err());
+        assert!(parse_cors_origin("").is_err());
+    }
+
+    #[test]
+    fn test_env_u64_with_default() {
+        assert_eq!(env_u64("DUAPI_TEST_MISSING_VAR", 30), 30);
+        // SAFETY: env mutation in a unit test; serial_test crate is already a dep.
+        unsafe { std::env::set_var("DUAPI_TEST_PARSE_OK", "120") };
+        assert_eq!(env_u64("DUAPI_TEST_PARSE_OK", 30), 120);
+        unsafe { std::env::set_var("DUAPI_TEST_PARSE_BAD", "not-a-number") };
+        assert_eq!(env_u64("DUAPI_TEST_PARSE_BAD", 30), 30);
     }
 }
