@@ -282,3 +282,28 @@ fn kill_pid(pid: u32) {
         .args(["-9", &pid.to_string()])
         .status();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bin_path_errors_when_binary_missing() {
+        // Neighboring the test binary there is no `__definitely-not-a-real-bin__`.
+        let err = bin_path("__definitely-not-a-real-bin__").unwrap_err();
+        assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn scan_progress_serializes_with_expected_fields() {
+        let p = ScanProgress {
+            stage: "scan".into(),
+            percent: 42,
+            message: Some("hi".into()),
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["stage"], "scan");
+        assert_eq!(json["percent"], 42);
+        assert_eq!(json["message"], "hi");
+    }
+}

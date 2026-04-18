@@ -27,7 +27,7 @@
     widthPercent: number;
     userColors: SvelteMap<string, string>;
     onCopyPath?: (path: string) => void;
-    onDelete?: (path: string, size: number) => void;
+    onDelete?: (path: string, size: number, owner: string) => void;
   } = $props();
 
   const toNum = (v: any) => {
@@ -69,7 +69,7 @@
         <div class="flex items-center gap-2 min-w-0">
           <ActionBar
             onCopy={onCopyPath ? () => onCopyPath(file.path) : undefined}
-            onDelete={onDelete ? () => onDelete(file.path, toNum(file.size)) : undefined}
+            onDelete={onDelete ? () => onDelete(file.path, toNum(file.size), file.owner) : undefined}
           />
           <span class="truncate">{file.owner}</span>
         </div>

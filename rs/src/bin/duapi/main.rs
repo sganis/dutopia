@@ -23,7 +23,10 @@ use dutopia::db;
 use dutopia::util::logging::init_tracing;
 use dutopia::util::print_about;
 
+mod cleanup;
+mod email;
 mod handler;
+mod mcp;
 mod query;
 mod shutdown;
 
@@ -151,7 +154,10 @@ async fn main() -> Result<()> {
         .route("/login", post(login_handler))
         .route("/users", get(users_handler))
         .route("/folders", get(get_folders_handler))
-        .route("/files", get(get_files_handler));
+        .route("/files", get(get_files_handler))
+        .route("/mcp", post(mcp::handler))
+        .route("/cleanup/script", post(cleanup::script_handler))
+        .route("/cleanup/notify", post(cleanup::notify_handler));
 
     let frontend = ServeDir::new(&static_dir)
         .not_found_service(ServeFile::new(format!("{}/index.html", static_dir)));

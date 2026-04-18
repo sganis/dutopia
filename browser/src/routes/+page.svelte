@@ -18,8 +18,10 @@
   import ScanPanel from "../lib/ScanPanel.svelte";
   import StatusBar from "../lib/StatusBar.svelte";
   import DeletePanel from "../lib/DeletePanel.svelte";
+  import CleanupPanel from "../lib/CleanupPanel.svelte";
   import { scanStatus } from "../ts/scan.svelte";
   import { deleteQueue, addToQueue } from "../ts/deleteQueue.svelte";
+  import { cleanupQueue, addToCleanupQueue } from "../ts/cleanupQueue.svelte";
 
   //#region types
   type Age = {
@@ -609,11 +611,18 @@
   async function openTerminal(p: string) {
     try { await api.openTerminal(p); } catch (err) { console.error("Open terminal failed:", err); }
   }
-  /** Trash-icon click on a row — stage the path for deletion. User reviews
-   *  and confirms from DeletePanel later (via the toolbar button). */
-  function targetForDeletion(p: string, size: number) {
-    addToQueue(p, size);
-    showToast(`Targeted for deletion (${deleteQueue.items.length})`);
+  /** Trash-icon click on a row — stage the path for deletion/cleanup.
+   *  Desktop builds end with an actual trash call via DeletePanel; web
+   *  builds end with a script download or email notify via CleanupPanel.
+   *  The two queues are separate so their localStorage never collides. */
+  function targetForDeletion(p: string, size: number, owner: string) {
+    if (__DESKTOP__) {
+      addToQueue(p, size);
+      showToast(`Targeted for deletion (${deleteQueue.items.length})`);
+    } else {
+      addToCleanupQueue(p, size, owner);
+      showToast(`Targeted for cleanup (${cleanupQueue.items.length})`);
+    }
   }
 
   function showToast(msg: string) {
@@ -635,6 +644,12 @@
       selectedUser = "All Users";
     } else {
       selectedUser = State.username;
+    }
+
+    // Web build: probe /api/health once so the cleanup panel can disable
+    // the Notify button when SMTP isn't configured on the server.
+    if (!__DESKTOP__) {
+      api.probeHealth();
     }
 
     fullPath = path;
@@ -726,6 +741,24 @@
           {/if}
         </div>
       </button>
+    {:else}
+      <button
+        class="btn relative"
+        onclick={() => (cleanupQueue.panelOpen = true)}
+        title="Review cleanup queue"
+        disabled={cleanupQueue.items.length === 0}
+      >
+        <div class="flex items-center gap-1">
+          <span class="material-symbols-outlined">delete_sweep</span>
+          {#if cleanupQueue.items.length > 0}
+            <span
+              class="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-red-600 text-white text-[0.65rem] leading-[1.1rem] text-center font-semibold"
+            >
+              {cleanupQueue.items.length}
+            </span>
+          {/if}
+        </div>
+      </button>
     {/if}
   </div>
   <div class="flex">
@@ -806,7 +839,7 @@
           onCopyPath={copyPath}
           onReveal={__DESKTOP__ ? revealPath : undefined}
           onTerminal={__DESKTOP__ ? openTerminal : undefined}
-          onDelete={__DESKTOP__ ? targetForDeletion : undefined}
+          onDelete={targetForDeletion}
           onUserHover={showTip}
           onUserMove={moveTip}
           onUserLeave={hideTip}
@@ -820,7 +853,7 @@
           widthPercent={filePct(file)}
           {userColors}
           onCopyPath={copyPath}
-          onDelete={__DESKTOP__ ? targetForDeletion : undefined}
+          onDelete={targetForDeletion}
         />
       {/each}
     </div>
@@ -833,6 +866,8 @@
 {#if __DESKTOP__}
   <StatusBar />
   <DeletePanel onChange={refresh} />
+{:else}
+  <CleanupPanel onToast={showToast} />
 {/if}
 
 {#if api.error}

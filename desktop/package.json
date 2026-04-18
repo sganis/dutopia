@@ -12,7 +12,10 @@
     "bundle-bin": "node scripts/bundle-bin.mjs",
     "tauri": "tauri",
     "tauri:dev": "npm run bundle-bin && tauri dev",
-    "tauri:build": "npm run bundle-bin && tauri build"
+    "tauri:build": "npm run bundle-bin && tauri build",
+    "test": "npm --prefix ../browser run test",
+    "test:rust": "cd src-tauri && cargo test",
+    "test:all": "npm run test && npm run test:rust"
   },
   "license": "MIT",
   "dependencies": {

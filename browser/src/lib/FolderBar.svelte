@@ -49,7 +49,10 @@
     onCopyPath?: (path: string) => void;
     onReveal?: (path: string) => void;
     onTerminal?: (path: string) => void;
-    onDelete?: (path: string, size: number) => void;
+    /** Called when the user clicks the trash icon. `owner` is set when the
+     *  folder has exactly one owner (web build requires single-owner folders
+     *  for cleanup requests). Desktop passes whatever owner — it ignores it. */
+    onDelete?: (path: string, size: number, owner: string) => void;
     onUserHover?: (e: MouseEvent, userData: UserStatsJson, percent: number) => void;
     onUserMove?: (e: MouseEvent) => void;
     onUserLeave?: () => void;
@@ -107,6 +110,15 @@
         return humanCount(toNum(userData?.count));
     }
   }
+
+  // A folder can be queued for cleanup only when every contributing file is
+  // owned by the same user — mixed-owner folders have no single target for
+  // the request. Hide the delete icon in that case rather than disabling it
+  // (the row's other actions still work).
+  const singleOwner = $derived.by(() => {
+    const keys = Object.keys(folder.users ?? {});
+    return keys.length === 1 ? keys[0] : null;
+  });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -145,7 +157,9 @@
         onCopy={onCopyPath ? () => onCopyPath(folder.path) : undefined}
         onReveal={onReveal ? () => onReveal(folder.path) : undefined}
         onTerminal={onTerminal ? () => onTerminal(folder.path) : undefined}
-        onDelete={onDelete ? () => onDelete(folder.path, toNum(folder.total_disk)) : undefined}
+        onDelete={onDelete && singleOwner
+          ? () => onDelete(folder.path, toNum(folder.total_disk), singleOwner!)
+          : undefined}
       />
       <p class="text-sm text-right">
         {bottomValueFolder(folder)}

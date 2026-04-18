@@ -25,8 +25,13 @@ export type ScanProgress = {
   message?: string;
 };
 
+const WEB_ONLY = "Web-only action invoked in desktop build.";
+
 class Api {
   public error: string = "";
+  /** Present so the cleanup panel (web-only) compiles against this
+   *  transport. Desktop never reads it. */
+  public smtpConfigured: boolean = false;
 
   private async call<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
     try {
@@ -101,6 +106,21 @@ class Api {
 
   async setRecentPaths(paths: string[]): Promise<void> {
     try { await invoke("set_recent_paths", { paths }); } catch (err) { console.error("setRecentPaths", err); }
+  }
+
+  // Web-only cleanup-request endpoints. The desktop build deletes directly
+  // via delete_path, so these are stubs; the CleanupPanel is only mounted
+  // under `!__DESKTOP__` and should never reach them.
+  async probeHealth(): Promise<void> { /* noop on desktop */ }
+  async cleanupScript(_username: string, _paths: { path: string; size: number }[]): Promise<Blob> {
+    throw new Error(WEB_ONLY);
+  }
+  async cleanupNotify(
+    _username: string,
+    _paths: { path: string; size: number }[],
+    _message?: string,
+  ): Promise<{ sent: boolean; to: string }> {
+    throw new Error(WEB_ONLY);
   }
 }
 

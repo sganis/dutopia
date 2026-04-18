@@ -13,12 +13,20 @@ use dutopia::auth::{keys, AuthBody, AuthError, AuthPayload, Claims};
 
 use dutopia::db;
 use dutopia::item::get_items;
+use crate::email;
 use crate::query::{parse_users_csv, FilesQuery, FolderQuery};
 use crate::{get_db, get_users};
 
 /// GET /api/health
+///
+/// `smtp_configured` tells the frontend whether the Notify button in the
+/// cleanup panel should be enabled — without this probe the button would
+/// always render and then fail on click with a 501.
 pub async fn health_handler() -> impl IntoResponse {
-    Json(serde_json::json!({"status": "ok"}))
+    Json(serde_json::json!({
+        "status": "ok",
+        "smtp_configured": email::is_configured(),
+    }))
 }
 
 /// POST /api/login
@@ -477,6 +485,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["status"], "ok");
+        assert!(v["smtp_configured"].is_boolean());
     }
 
     #[tokio::test]

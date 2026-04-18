@@ -25,6 +25,9 @@ const DESKTOP_ONLY = "Desktop-only action invoked in web build.";
 class Api {
   private baseUrl = `${API_URL}/`;
   public error: string = "";
+  /** Mirrors /api/health.smtp_configured. Used to gate the Notify button in
+   *  the cleanup panel. Populated lazily by probeHealth(). */
+  public smtpConfigured: boolean = false;
 
   private async request<T>(
     endpoint: string = "",
@@ -90,6 +93,64 @@ class Api {
     const url = `files?${pathParam}${userParam}${ageParam}`
     let result = await this.request<ScannedFile[]>(url, "GET", undefined, true)
     return result ?? []
+  }
+
+  /** One-shot probe of /api/health. Caches the smtp_configured flag on the
+   *  Api instance so the cleanup panel can gate the Notify button without
+   *  calling /health on every render. */
+  async probeHealth(): Promise<void> {
+    try {
+      const resp = await fetch(`${this.baseUrl}health`, {
+        headers: { Authorization: `Bearer ${State.token}` },
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      this.smtpConfigured = !!data?.smtp_configured;
+    } catch {
+      /* network hiccup — leave smtpConfigured at previous value */
+    }
+  }
+
+  /** POST /api/cleanup/script. Returns the Python script as a Blob the
+   *  caller can save via URL.createObjectURL. */
+  async cleanupScript(
+    username: string,
+    paths: { path: string; size: number }[],
+  ): Promise<Blob> {
+    const resp = await fetch(`${this.baseUrl}cleanup/script`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${State.token}`,
+      },
+      body: JSON.stringify({ username, paths }),
+    });
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(msg || `cleanup/script failed (${resp.status})`);
+    }
+    return resp.blob();
+  }
+
+  /** POST /api/cleanup/notify. Admin only on the server. */
+  async cleanupNotify(
+    username: string,
+    paths: { path: string; size: number }[],
+    message?: string,
+  ): Promise<{ sent: boolean; to: string }> {
+    const resp = await fetch(`${this.baseUrl}cleanup/notify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${State.token}`,
+      },
+      body: JSON.stringify({ username, paths, message }),
+    });
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(msg || `cleanup/notify failed (${resp.status})`);
+    }
+    return resp.json();
   }
 
   // Desktop-only methods. Stubs in the web build — only callable from

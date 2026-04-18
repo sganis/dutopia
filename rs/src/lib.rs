@@ -5,3 +5,4 @@ pub mod storage;
 pub mod db;
 pub mod item;
 pub mod query;
+pub mod analytic;

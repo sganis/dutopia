@@ -32,7 +32,13 @@
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat update -p aws-lc-sys -p aws-lc-rs -p rustls-webpki -p rand@0.9.4 -p time -p simple_asn1 -p jsonwebtoken\")",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:rustsec.org)",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check\")"
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin duapi\")",
+      "Bash(xargs grep *)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi cleanup:: email::\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi cleanup::\")",
+      "Read(//tmp/**)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --lib analytic\")"
     ]
   }
 }
