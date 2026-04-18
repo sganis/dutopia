@@ -2,6 +2,7 @@
 <script lang="ts">
   import type { SvelteMap } from "svelte/reactivity";
   import { humanBytes, humanCount, humanTime } from "../ts/util";
+  import ActionBar from "./ActionBar.svelte";
 
   type UserStatsJson = {
     username: string;
@@ -32,6 +33,7 @@
     widthPercent,
     userColors,
     onclick,
+    onCopyPath,
     onUserHover,
     onUserMove,
     onUserLeave,
@@ -41,6 +43,7 @@
     widthPercent: number;
     userColors: SvelteMap<string, string>;
     onclick: () => void;
+    onCopyPath?: (path: string) => void;
     onUserHover?: (e: MouseEvent, userData: UserStatsJson, percent: number) => void;
     onUserMove?: (e: MouseEvent) => void;
     onUserLeave?: () => void;
@@ -131,8 +134,9 @@
       </div>
       <span class="text-nowrap font-bold">{rightValueFolder(folder)}</span>
     </div>
-    <div class="flex justify-end">
-      <p class="text-sm">
+    <div class="flex items-center justify-between gap-2">
+      <ActionBar onCopy={onCopyPath ? () => onCopyPath(folder.path) : undefined} />
+      <p class="text-sm text-right">
         {bottomValueFolder(folder)}
         • Updated {humanTime(folder.modified)}
         {#if humanTime(folder.accessed) > humanTime(folder.modified)}

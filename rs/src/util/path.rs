@@ -1,6 +1,63 @@
 // rs/src/util/path.rs
 use std::path::{Path, PathBuf};
 
+/// Compute the parent of a `dusum`-stored path string, in the same OS-native
+/// form `dusum::aggregate::get_folder_ancestors` produces. Returns `None`
+/// when the path is at the top of its native hierarchy (Unix `/`, Windows
+/// drive root `C:\`, UNC bare server `\\srv`) — callers maintaining a
+/// synthetic root above all platform roots should treat `None` as
+/// "parent_id = synthetic root".
+///
+///   `/var/log`            -> `Some("/var")`
+///   `/var`                -> `Some("/")`
+///   `/`                   -> `None`
+///   `C:\Users\San`        -> `Some("C:\\Users")`
+///   `C:\Users`            -> `Some("C:\\")`
+///   `C:\`                 -> `None`
+///   `\\srv\shr\dir`       -> `Some("\\\\srv\\shr")`
+///   `\\srv\shr`           -> `Some("\\\\srv")`
+///   `\\srv`               -> `None`
+///   `""`                  -> `None`  (the synthetic root has no parent)
+pub fn dusum_parent(p: &str) -> Option<String> {
+    if p.is_empty() || p == "/" {
+        return None;
+    }
+    let bytes = p.as_bytes();
+
+    // Drive root: "C:\"
+    if bytes.len() == 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+    {
+        return None;
+    }
+
+    // UNC bare server: "\\srv" — no further `\` after the leading "\\".
+    if p.starts_with(r"\\") && !p[2..].contains('\\') {
+        return None;
+    }
+
+    // Find the rightmost separator (either kind, whichever appears last).
+    let last = match (p.rfind('\\'), p.rfind('/')) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return None,
+    };
+
+    // Subdir of Unix root: "/var" → "/"
+    if last == 0 {
+        return Some("/".to_string());
+    }
+    // Subdir of Windows drive root: "C:\Users" → "C:\"
+    if last == 2 && bytes.len() > 3 && bytes[1] == b':' {
+        return Some(format!("{}:\\", bytes[0] as char));
+    }
+
+    Some(p[..last].to_string())
+}
+
 #[cfg(windows)]
 pub fn strip_verbatim_prefix(p: &Path) -> PathBuf {
     let s = match p.to_str() {
@@ -169,6 +226,69 @@ mod tests {
 
         let result = is_volume_root(Path::new("C:\\Windows"));
         let _ = result;
+    }
+
+    #[test]
+    fn dusum_parent_unix() {
+        assert_eq!(dusum_parent("/"), None);
+        assert_eq!(dusum_parent("/var"), Some("/".to_string()));
+        assert_eq!(dusum_parent("/var/log"), Some("/var".to_string()));
+        assert_eq!(
+            dusum_parent("/var/log/syslog"),
+            Some("/var/log".to_string())
+        );
+    }
+
+    #[test]
+    fn dusum_parent_windows_drive() {
+        assert_eq!(dusum_parent("C:\\"), None);
+        assert_eq!(dusum_parent("c:\\"), None);
+        assert_eq!(dusum_parent("C:\\Users"), Some("C:\\".to_string()));
+        assert_eq!(
+            dusum_parent("C:\\Users\\San"),
+            Some("C:\\Users".to_string())
+        );
+        assert_eq!(dusum_parent("D:\\Foo\\Bar"), Some("D:\\Foo".to_string()));
+    }
+
+    #[test]
+    fn dusum_parent_unc() {
+        assert_eq!(dusum_parent(r"\\srv"), None);
+        assert_eq!(dusum_parent(r"\\srv\shr"), Some(r"\\srv".to_string()));
+        assert_eq!(
+            dusum_parent(r"\\srv\shr\dir"),
+            Some(r"\\srv\shr".to_string())
+        );
+    }
+
+    #[test]
+    fn dusum_parent_synthetic_root() {
+        assert_eq!(dusum_parent(""), None);
+    }
+
+    /// Cross-check: for every path `dusum::get_folder_ancestors` would emit,
+    /// `dusum_parent` of `ancestors[i+1]` must equal `ancestors[i]`. Pinning
+    /// this guarantees parent_id chains rebuilt by `dudb` match dusum's
+    /// notion of the tree byte-for-byte.
+    #[test]
+    fn dusum_parent_inverts_get_folder_ancestors() {
+        let cases: &[&[&str]] = &[
+            &["/", "/var", "/var/log"],
+            &["C:\\", "C:\\Users", "C:\\Users\\San"],
+            &[r"\\srv", r"\\srv\shr", r"\\srv\shr\dir"],
+        ];
+        for chain in cases {
+            for win in chain.windows(2) {
+                let parent = dusum_parent(win[1]).unwrap_or_default();
+                assert_eq!(
+                    parent, win[0],
+                    "parent of {:?} should be {:?}, got {:?}",
+                    win[1], win[0], parent
+                );
+            }
+            // The first entry in each chain has no parent (top of its hierarchy).
+            assert_eq!(dusum_parent(chain[0]), None, "{:?} should be top-level", chain[0]);
+        }
     }
 
     #[test]

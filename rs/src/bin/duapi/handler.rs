@@ -11,9 +11,10 @@ use std::time::SystemTime;
 
 use dutopia::auth::{keys, AuthBody, AuthError, AuthPayload, Claims};
 
+use crate::db;
 use crate::item::get_items;
 use crate::query::{parse_users_csv, FilesQuery, FolderQuery};
-use crate::{get_fs_index, get_users};
+use crate::{get_db, get_users};
 
 /// GET /api/health
 pub async fn health_handler() -> impl IntoResponse {
@@ -26,8 +27,8 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
         return Err(AuthError::MissingCredentials);
     }
 
-    let verify = dutopia::auth::verify_credentials(&payload.username, &payload.password);
-    if !verify.authenticated {
+    let verified = dutopia::auth::verify_credentials(&payload.username, &payload.password);
+    if !verified.authenticated {
         return Err(AuthError::WrongCredentials);
     }
 
@@ -45,8 +46,8 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
         .filter(|s| !s.is_empty())
         .collect();
 
-    let is_admin = verify.admin_override
-        || admins.contains(&payload.username.trim().to_ascii_lowercase());
+    let is_admin =
+        verified.admin_override || admins.contains(&payload.username.trim().to_ascii_lowercase());
 
     let claims = Claims {
         sub: payload.username.to_owned(),
@@ -104,9 +105,23 @@ pub async fn get_folders_handler(
         }
     }
 
-    let index = get_fs_index();
-    let items = match index.list_children(&path, &requested, q.age) {
-        Ok(mut v) => {
+    let pool = get_db().clone();
+    let path_for_task = path.clone();
+    let age_filter = q.age;
+    let fut = tokio::task::spawn_blocking(move || {
+        db::list_children(&pool, &path_for_task, &requested, age_filter)
+    });
+
+    let items = match fut.await {
+        Err(join_err) => {
+            tracing::error!(err = %join_err, "500 Task Join Error /api/folders");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {join_err}"),
+            )
+                .into_response();
+        }
+        Ok(Ok(mut v)) => {
             let cap = crate::query::max_page_size();
             if v.len() > cap {
                 tracing::warn!(path = %path, total = v.len(), cap, "/api/folders truncated");
@@ -115,7 +130,7 @@ pub async fn get_folders_handler(
             tracing::info!(path = %path, items = v.len(), "200 OK /api/folders");
             v
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(path = %path, err = %e, "list_children ERROR /api/folders");
             Vec::new()
         }
@@ -136,11 +151,11 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 tracing::warn!(input = %raw, "400 Bad Request /api/files rejected path");
                 return (StatusCode::BAD_REQUEST, "invalid path").into_response();
             }
-            Some(p) if p == "/" || p.is_empty() => {
-                tracing::warn!(path = %p, "400 Bad Request /api/files root not allowed");
+            Some(p) if p == "/" => {
+                tracing::warn!("400 Bad Request /api/files path '/' not allowed");
                 return (
                     StatusCode::BAD_REQUEST,
-                    "root path not allowed for /api/files",
+                    "path '/' not allowed for /api/files",
                 )
                     .into_response();
             }
@@ -178,8 +193,16 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 .into_response()
         }
         Ok(Err(e)) => {
-            tracing::warn!(err = %e, "400 Bad Request /api/files");
-            (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+            #[cfg(not(unix))]
+            {
+                tracing::warn!(err = %e, "501 Not Implemented /api/files");
+                (StatusCode::NOT_IMPLEMENTED, e.to_string()).into_response()
+            }
+            #[cfg(unix)]
+            {
+                tracing::warn!(err = %e, "400 Bad Request /api/files");
+                (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+            }
         }
         Ok(Ok(mut items)) => {
             let cap = crate::query::max_page_size();
@@ -199,41 +222,34 @@ mod tests {
     use axum::body::to_bytes;
     use axum::extract::Query;
     use serial_test::serial;
-    use std::io::Write;
-    use tempfile::{tempdir, NamedTempFile};
+    #[cfg(unix)]
+    use tempfile::tempdir;
 
-    use crate::index::{FolderOut, InMemoryFSIndex};
+    use crate::db::FolderOut;
+    #[cfg(unix)]
     use crate::item::FsItemOut;
-    use crate::{FS_INDEX, USERS};
+    use crate::{DB_POOL, TEST_DB, USERS};
 
     const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
-    fn init_index_once() {
-        if FS_INDEX.get().is_some() {
+    fn init_db_once() {
+        if DB_POOL.get().is_some() {
             return;
         }
-
-        let mut f = NamedTempFile::new().expect("tmp csv");
-        writeln!(
-            f,
-            "path,user,age,files,size,disk,linked,atime,mtime\n\
-             /,alice,0,2,200,100,0,1700000000,1700000100\n\
-             /,bob,1,1,50,50,0,1600000000,1600000100\n\
-             /docs,alice,2,3,600,300,300,1500000000,1500000050"
-        )
-        .unwrap();
-        let p = f.into_temp_path();
-
-        let mut idx = InMemoryFSIndex::new();
-        let users = idx.load_from_csv(p.as_ref()).expect("load_from_csv");
-        FS_INDEX.set(idx).expect("FS_INDEX set once");
-        USERS.set(users).expect("USERS set once");
+        let temp_db = crate::db::test_support::build_test_db();
+        let pool = crate::db::open_pool(&temp_db.path).expect("open_pool");
+        let users = crate::db::list_users(&pool).expect("list_users");
+        // Keep the TempDb alive for the entire test run so the file is not
+        // removed while the pool is still using it.
+        let _ = TEST_DB.set(temp_db);
+        let _ = DB_POOL.set(pool);
+        let _ = USERS.set(users);
     }
 
     #[tokio::test]
     #[serial]
     async fn test_users_handler_admin_and_user() {
-        init_index_once();
+        init_db_once();
         let admin = Claims {
             sub: "root".to_string(),
             is_admin: true,
@@ -264,7 +280,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_folders_handler_authz_and_filters() {
-        init_index_once();
+        init_db_once();
 
         let non_admin = Claims {
             sub: "alice".into(),
@@ -430,15 +446,14 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_list_children_filters_and_ages() {
-        init_index_once();
-        let idx = FS_INDEX.get().unwrap();
+        init_db_once();
+        let pool = DB_POOL.get().unwrap();
 
-        let items = idx.list_children("/", &Vec::new(), None).unwrap();
+        let items = crate::db::list_children(pool, "/", &[], None).unwrap();
         assert!(items.iter().any(|it| it.path == "/docs"));
 
-        let items_alice = idx
-            .list_children("/", &vec!["alice".into()], None)
-            .unwrap();
+        let items_alice =
+            crate::db::list_children(pool, "/", &["alice".to_string()], None).unwrap();
         assert!(items_alice.iter().any(|it| it.path == "/docs"));
         let docs = items_alice
             .into_iter()
@@ -446,7 +461,7 @@ mod tests {
             .unwrap();
         assert!(docs.users.contains_key("alice"));
 
-        let items_age2 = idx.list_children("/", &Vec::new(), Some(2)).unwrap();
+        let items_age2 = crate::db::list_children(pool, "/", &[], Some(2)).unwrap();
         let docs2 = items_age2
             .into_iter()
             .find(|it| it.path == "/docs")
@@ -467,7 +482,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_folders_handler_clamps_to_max_page_size() {
-        init_index_once();
+        init_db_once();
         // SAFETY: we set then restore for test isolation.
         unsafe { std::env::set_var("MAX_PAGE_SIZE", "1") };
         let admin = Claims {

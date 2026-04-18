@@ -552,6 +552,15 @@
     }
   }
 
+  async function copyPath(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showCopyFeedback();
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
+  }
+
   function showCopyFeedback() {
     copyFeedbackVisible = true;
     setTimeout(() => {
@@ -703,6 +712,7 @@
           widthPercent={pct(folder)}
           {userColors}
           onclick={() => navigateTo(folder.path)}
+          onCopyPath={copyPath}
           onUserHover={showTip}
           onUserMove={moveTip}
           onUserLeave={hideTip}
@@ -710,7 +720,13 @@
       {/each}
 
       {#each sortedfiles as file}
-        <FileBar {file} {sortBy} widthPercent={filePct(file)} {userColors} onCopyPath={(e) => copyText(e)} />
+        <FileBar
+          {file}
+          {sortBy}
+          widthPercent={filePct(file)}
+          {userColors}
+          onCopyPath={copyPath}
+        />
       {/each}
     </div>
   {/if}

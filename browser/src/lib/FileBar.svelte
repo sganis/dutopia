@@ -2,6 +2,7 @@
 <script lang="ts">
   import type { SvelteMap } from "svelte/reactivity";
   import { humanBytes, humanTime } from "../ts/util";
+  import ActionBar from "./ActionBar.svelte";
 
   type ScannedFile = {
     path: string;
@@ -24,7 +25,7 @@
     sortBy: SortKey;
     widthPercent: number;
     userColors: SvelteMap<string, string>;
-    onCopyPath?: (e: MouseEvent) => void;
+    onCopyPath?: (path: string) => void;
   } = $props();
 
   const toNum = (v: any) => {
@@ -45,7 +46,6 @@
   const color = $derived(userColors.get(file.owner));
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="flex">
   <span class="material-symbols-outlined text-4xl">subdirectory_arrow_right</span>
   <div class="relative flex grow px-2 py-1 bg-gray-700 border border-gray-500 rounded overflow-hidden text-xs">
@@ -57,18 +57,18 @@
       ></div>
       <div class="relative z-10 flex items-center justify-between gap-2">
         <div class="w-full overflow-hidden">
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <span class="cursor-pointer text-ellipsis text-nowrap" onclick={onCopyPath}>
-            {file.path}
-          </span>
+          <span class="text-ellipsis text-nowrap">{file.path}</span>
         </div>
         <div class="flex items-center gap-4 text-sm font-semibold text-nowrap">
           {rightValueFile(file)}
         </div>
       </div>
-      <div class="relative z-10 flex justify-between">
-        <div class="">{file.owner}</div>
-        <div class="">
+      <div class="relative z-10 flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <ActionBar onCopy={onCopyPath ? () => onCopyPath(file.path) : undefined} />
+          <span class="truncate">{file.owner}</span>
+        </div>
+        <div class="text-nowrap">
           Updated {humanTime(file.modified)}
           {#if humanTime(file.accessed) > humanTime(file.modified)}
             • Read {humanTime(file.accessed)}

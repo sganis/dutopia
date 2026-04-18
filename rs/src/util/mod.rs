@@ -13,7 +13,7 @@ pub use format::{
     format_duration, get_hostname, human_bytes, human_count, parse_file_hint, print_about,
     progress_bar, spinner,
 };
-pub use path::{is_volume_root, should_skip, strip_verbatim_prefix};
+pub use path::{dusum_parent, is_volume_root, should_skip, strip_verbatim_prefix};
 pub use platform::fs_used_bytes;
 pub use row::Row;
 

@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin dusum\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dusum\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duscan --bin dusum\")",
+      "Bash(bun run *)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat build --release --bin duscan --bin dusum --bin duapi\")",
+      "Bash(c:/Dev/dutopia/rs/target/release/duscan.exe c:/tmp/duscan-test -o c:/tmp/duscan-test.csv)",
+      "Read(//c/tmp/**)",
+      "Bash(c:/Dev/dutopia/rs/target/release/dusum.exe c:/tmp/duscan-test.csv -o c:/tmp/duscan-test.sum.csv)",
+      "Bash(rm -rf /tmp/gen-test)",
+      "Bash(python python/generate.py --root /tmp/gen-test --total 500)",
+      "Bash(python c:/Dev/dutopia/python/generate.py --root /tmp/gen-test --total 500000)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin duapi --bin dudb\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --tests --bin duapi --bin dudb\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi --bin dudb\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat build --release --bin duapi --bin dudb\")",
+      "Bash(c:/Dev/dutopia/rs/target/release/dudb.exe *)",
+      "Bash(c:/Dev/dutopia/rs/target/release/duapi.exe *)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat clippy --bin duapi --bin dudb -- -D warnings\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat clippy --bin duapi --bin dudb 2>&1\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat clippy --bin dudb 2>&1\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dudb --bin duapi\")",
+      "Bash(python *)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat build --release --bin duapi\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi --bin dudb --lib\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dudb windows_ingest\")"
+    ]
+  }
+}

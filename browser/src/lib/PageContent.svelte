@@ -16,7 +16,7 @@
   export let pct: (folder: any) => number;
   export let filePct: (file: any) => number;
   export let onFolderClick: (path: string) => void;
-  export let onCopyPath: (e: MouseEvent) => void;
+  export let onCopyPath: (path: string) => void;
   export let onUserHover: (e: MouseEvent, userData: any, percent: number) => void;
   export let onUserMove: (e: MouseEvent) => void;
   export let onUserLeave: () => void;
@@ -67,6 +67,7 @@
         widthPercent={pct(folder)}
         {userColors}
         onclick={() => onFolderClick(folder.path)}
+        onCopyPath={onCopyPath}
         onUserHover={onUserHover}
         onUserMove={onUserMove}
         onUserLeave={onUserLeave}

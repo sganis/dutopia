@@ -22,17 +22,20 @@ use tower_http::timeout::TimeoutLayer;
 use dutopia::util::logging::init_tracing;
 use dutopia::util::print_about;
 
+mod db;
 mod handler;
-mod index;
 mod item;
 mod query;
 mod shutdown;
 
+use db::DbPool;
 use handler::{get_files_handler, get_folders_handler, health_handler, login_handler, users_handler};
-use index::InMemoryFSIndex;
 
-static FS_INDEX: OnceLock<InMemoryFSIndex> = OnceLock::new();
+static DB_POOL: OnceLock<DbPool> = OnceLock::new();
 static USERS: OnceLock<Vec<String>> = OnceLock::new();
+
+#[cfg(test)]
+static TEST_DB: OnceLock<db::test_support::TempDb> = OnceLock::new();
 
 #[derive(Parser, Debug)]
 #[command(
@@ -41,7 +44,7 @@ static USERS: OnceLock<Vec<String>> = OnceLock::new();
     about = "Disk usage API server with web UI"
 )]
 struct Args {
-    /// Input CSV file path
+    /// Input SQLite database file path (built by `dudb`)
     input: PathBuf,
     /// UI folder (defaults to STATIC_DIR env var or local public directory)
     #[arg(short, long, value_name = "DIR", env = "STATIC_DIR")]
@@ -76,7 +79,7 @@ async fn main() -> Result<()> {
     }
 
     let args = Args::parse();
-    let csv_path = args.input.clone();
+    let db_path = args.input.clone();
     let static_dir: String = args
         .static_dir
         .or_else(|| std::env::var("STATIC_DIR").ok())
@@ -106,11 +109,19 @@ async fn main() -> Result<()> {
         }
     }
 
-    let mut idx = InMemoryFSIndex::new();
-    let users = idx.load_from_csv(&csv_path)?;
+    println!("Opening database: {}", db_path.display());
+    let pool = db::open_pool(&db_path).with_context(|| {
+        format!(
+            "opening DB at {}. Build it first with `dudb --input <csv> --output {}`",
+            db_path.display(),
+            db_path.display()
+        )
+    })?;
+    let users = db::list_users(&pool).context("loading user list")?;
+    println!("Loaded {} users", users.len());
 
-    if FS_INDEX.set(idx).is_err() {
-        eprintln!("{}", "FATAL: FS_INDEX already initialized".red());
+    if DB_POOL.set(pool).is_err() {
+        eprintln!("{}", "FATAL: DB_POOL already initialized".red());
         std::process::exit(1);
     }
     if USERS.set(users).is_err() {
@@ -287,8 +298,8 @@ fn default_static_dir() -> String {
     static_dir.to_string_lossy().into_owned()
 }
 
-pub fn get_fs_index() -> &'static InMemoryFSIndex {
-    FS_INDEX.get().expect("FS index not initialized")
+pub fn get_db() -> &'static DbPool {
+    DB_POOL.get().expect("DB pool not initialized")
 }
 
 pub fn get_users() -> &'static Vec<String> {

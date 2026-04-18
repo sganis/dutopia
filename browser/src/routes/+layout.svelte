@@ -1,7 +1,6 @@
 <!-- browser/src/routes/+layout.svelte -->
 <script>
   import "../app.css";
-  import logo from '../assets/disk_usage.svg';
   import Login from '../lib/Login.svelte';
   import { State } from '../ts/store.svelte';
   import { clearAll } from '../ts/cache';
@@ -26,9 +25,10 @@
 
 <div class="flex flex-col h-screen min-h-0 overflow-hidden">
   <div class="flex items-center justify-between p-4 text-xl border-b border-gray-500 text-gray-200 select-none">
-    <div class="flex gap-2 items-center">
-      <div><img src={logo} width={28} alt="logo" /></div>
-      <div>Dutopia 3.0</div>
+    <div class="flex gap-2 items-baseline">
+      <div class="self-center"><img src="/icon.svg" width={26} height={26} alt="Dutopia" /></div>
+      <div>Dutopia</div>
+      <div class="text-xs opacity-60">v{__APP_VERSION__}</div>
     </div>
 
     <div class="grow"></div>
