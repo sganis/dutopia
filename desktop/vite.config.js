@@ -43,5 +43,16 @@ export default defineConfig(async () => ({
     __APP_VERSION__: JSON.stringify(browserPkg.version ?? pkg.version),
   },
 
+  // Prevent Vite's esbuild plugin from walking up to ../browser/tsconfig.json
+  // (which extends .svelte-kit/tsconfig.json that doesn't exist in browser/).
+  esbuild: {
+    tsconfigRaw: JSON.stringify({
+      compilerOptions: {
+        verbatimModuleSyntax: true,
+        target: "esnext",
+      },
+    }),
+  },
+
   build: { sourcemap: true },
 }));

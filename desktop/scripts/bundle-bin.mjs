@@ -7,7 +7,7 @@
 // Run before `tauri dev` / `tauri build`.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, statSync, symlinkSync, readlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,6 +56,21 @@ for (const name of ["duscan", "dusum", "dudb"]) {
   const dst = join(binOut, `${name}-${triple}${exeSuffix}`);
   copyFileSync(src, dst);
   console.log(`  ${src}  →  ${dst}`);
+}
+
+// Symlink ../browser/node_modules → desktop/node_modules so that Vite/Rollup
+// can resolve packages (svelecte, etc.) when processing shared source files
+// that live under ../browser/src/.
+const browserNM = resolve(desktopRoot, "..", "browser", "node_modules");
+const desktopNM = join(desktopRoot, "node_modules");
+try {
+  const existing = readlinkSync(browserNM);
+  if (resolve(dirname(browserNM), existing) !== desktopNM) {
+    throw new Error("stale symlink");
+  }
+} catch {
+  try { spawnSync("rm", ["-rf", browserNM]); } catch {}
+  symlinkSync(desktopNM, browserNM);
 }
 
 console.log("done.");
