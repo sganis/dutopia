@@ -9,21 +9,33 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "bundle-bin": "node scripts/bundle-bin.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "npm run bundle-bin && tauri dev",
+    "tauri:build": "npm run bundle-bin && tauri build"
   },
   "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-shell": "^2"
   },
   "devDependencies": {
-    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/adapter-static": "^3.0.9",
     "@sveltejs/kit": "^2.9.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tailwindcss/vite": "^4.1.13",
+    "@tauri-apps/cli": "^2",
+    "date-fns": "^4.1.0",
+    "idb": "^8.0.3",
+    "material-symbols": "^0.35.0",
+    "svelecte": "^5",
     "svelte": "^5.0.0",
+    "svelte-awesome-color-picker": "^4.0.2",
     "svelte-check": "^4.0.0",
+    "tailwindcss": "^4",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3",
-    "@tauri-apps/cli": "^2"
+    "vite": "^6.0.3"
   }
 }

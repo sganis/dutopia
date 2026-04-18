@@ -19,12 +19,11 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 
+use dutopia::db;
 use dutopia::util::logging::init_tracing;
 use dutopia::util::print_about;
 
-mod db;
 mod handler;
-mod item;
 mod query;
 mod shutdown;
 

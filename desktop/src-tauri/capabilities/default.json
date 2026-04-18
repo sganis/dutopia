@@ -5,6 +5,16 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "shell:default",
+    "dialog:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "bin/duscan", "sidecar": true, "args": true },
+        { "name": "bin/dusum", "sidecar": true, "args": true },
+        { "name": "bin/dudb", "sidecar": true, "args": true }
+      ]
+    }
   ]
 }

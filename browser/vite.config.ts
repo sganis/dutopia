@@ -8,5 +8,6 @@ export default defineConfig({
 	build: { sourcemap: true },
 	define: {
 		__APP_VERSION__: JSON.stringify(pkg.version),
+		__DESKTOP__: 'false',
 	},
 });

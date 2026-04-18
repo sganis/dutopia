@@ -1,7 +1,11 @@
-// Tauri doesn't have a Node.js server to do proper SSR
-// so we use adapter-static with a fallback to index.html to put the site in SPA mode
-// See: https://svelte.dev/docs/kit/single-page-apps
-// See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
+// desktop/svelte.config.js
+//
+// Desktop SvelteKit build. Shares routes / lib / assets with ../browser
+// via kit.files so the Svelte source is a single source of truth. The
+// only desktop-specific frontend files are this config, vite.config.js,
+// tsconfig.json, src/app.html, and the Tauri transport
+// (../browser/src/ts/api.tauri.svelte.ts, resolved via the $api alias).
+
 import adapter from "@sveltejs/adapter-static";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 
@@ -12,6 +16,15 @@ const config = {
     adapter: adapter({
       fallback: "index.html",
     }),
+    files: {
+      routes: "../browser/src/routes",
+      lib: "../browser/src/lib",
+      assets: "../browser/static",
+      appTemplate: "src/app.html",
+    },
+    alias: {
+      $api: "../browser/src/ts/api.tauri.svelte.ts",
+    },
   },
 };
 

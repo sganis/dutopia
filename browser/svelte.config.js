@@ -18,7 +18,13 @@ const config = {
       strict: false
     }),
     // leave base empty since we’re serving at /
-    paths: { base: '' }
+    paths: { base: '' },
+    alias: {
+      // $api is the transport module — fetch-based in the web build,
+      // tauri invoke-based in the desktop build. Components import from '$api'
+      // so they never depend on the concrete transport.
+      $api: 'src/ts/api.web.svelte.ts'
+    }
   },
 };
 

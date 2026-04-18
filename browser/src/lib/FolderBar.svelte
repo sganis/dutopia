@@ -1,7 +1,7 @@
 <!-- browser/src/lib/FolderBar.svelte -->
 <script lang="ts">
   import type { SvelteMap } from "svelte/reactivity";
-  import { humanBytes, humanCount, humanTime } from "../ts/util";
+  import { humanBytes, humanCount, humanTime, isWindows } from "../ts/util";
   import ActionBar from "./ActionBar.svelte";
 
   type UserStatsJson = {
@@ -34,6 +34,9 @@
     userColors,
     onclick,
     onCopyPath,
+    onReveal,
+    onTerminal,
+    onDelete,
     onUserHover,
     onUserMove,
     onUserLeave,
@@ -44,6 +47,9 @@
     userColors: SvelteMap<string, string>;
     onclick: () => void;
     onCopyPath?: (path: string) => void;
+    onReveal?: (path: string) => void;
+    onTerminal?: (path: string) => void;
+    onDelete?: (path: string, size: number) => void;
     onUserHover?: (e: MouseEvent, userData: UserStatsJson, percent: number) => void;
     onUserMove?: (e: MouseEvent) => void;
     onUserLeave?: () => void;
@@ -81,13 +87,13 @@
   }
 
   function bottomValueFolder(f: FolderItem) {
+    const linkedSuffix = isWindows ? "" : ` • Linked: ${humanBytes(toNum(f?.total_linked))}`;
     switch (sortBy) {
       case "disk":
-        return `${humanCount(toNum(f?.total_count))} Files • Linked: ${humanBytes(toNum(f?.total_linked))}`;
       case "size":
-        return `${humanCount(toNum(f?.total_count))} Files • Linked: ${humanBytes(toNum(f?.total_linked))}`;
+        return `${humanCount(toNum(f?.total_count))} Files${linkedSuffix}`;
       case "count":
-        return `Disk: ${humanBytes(toNum(f?.total_disk))} • Linked: ${humanBytes(toNum(f?.total_linked))}`;
+        return `Disk: ${humanBytes(toNum(f?.total_disk))}${linkedSuffix}`;
     }
   }
 
@@ -135,7 +141,12 @@
       <span class="text-nowrap font-bold">{rightValueFolder(folder)}</span>
     </div>
     <div class="flex items-center justify-between gap-2">
-      <ActionBar onCopy={onCopyPath ? () => onCopyPath(folder.path) : undefined} />
+      <ActionBar
+        onCopy={onCopyPath ? () => onCopyPath(folder.path) : undefined}
+        onReveal={onReveal ? () => onReveal(folder.path) : undefined}
+        onTerminal={onTerminal ? () => onTerminal(folder.path) : undefined}
+        onDelete={onDelete ? () => onDelete(folder.path, toNum(folder.total_disk)) : undefined}
+      />
       <p class="text-sm text-right">
         {bottomValueFolder(folder)}
         • Updated {humanTime(folder.modified)}

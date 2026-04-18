@@ -3,7 +3,7 @@
   import { onMount } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS, escapeHtml } from "../ts/util";
-  import { api } from "../ts/api.svelte";
+  import { api } from "$api";
   import { API_URL, State } from "../ts/store.svelte";
   import Svelecte, { addRenderer } from "svelecte";
   import ColorPicker from "svelte-awesome-color-picker";
@@ -15,6 +15,11 @@
   import FileBar from "../lib/FileBar.svelte";
   import PathStats from "../lib/PathStats.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
+  import ScanPanel from "../lib/ScanPanel.svelte";
+  import StatusBar from "../lib/StatusBar.svelte";
+  import DeletePanel from "../lib/DeletePanel.svelte";
+  import { scanStatus } from "../ts/scan.svelte";
+  import { deleteQueue, addToQueue } from "../ts/deleteQueue.svelte";
 
   //#region types
   type Age = {
@@ -91,6 +96,8 @@
   let pathInput = $state();
   let isEditing = $state(false);
   let copyFeedbackVisible = $state(false);
+  let toastMessage = $state("");
+  let toastTimer: number | null = null;
   let tip = $state<Tip>({ show: false, x: 0, y: 0 });
   //#endregion
 
@@ -108,7 +115,7 @@
         : _isSelection
           ? selectedUserColor
           : item.color;
-    const user_css = !State.isAdmin ? "text-gray-400" : "";
+    const user_css = (!__DESKTOP__ && !State.isAdmin) ? "text-gray-400" : "";
     return `<div class="flex gap-2 items-center">
                 <div class="border border-gray-500 rounded"
                     style="${icon_base} background: ${icon_bg};">
@@ -525,6 +532,9 @@
   /**
    * Minimal normalization: trim trailing separators, preserve OS-native form.
    *   `C:\Users\San\` -> `C:\Users\San`
+   *   `C:\`           -> `C:\`     (drive root keeps the backslash — stripping
+   *                                  it would turn the path into a drive-
+   *                                  relative reference like `F:foo.txt`)
    *   `/var/log/`     -> `/var/log`
    *   `/`             -> `/`
    *   empty           -> ``       (synthetic trie root)
@@ -533,6 +543,7 @@
     if (!p) return "";
     const s = p.trim();
     if (s === "/" || s === "\\") return s;
+    if (/^[A-Za-z]:\\$/.test(s)) return s;
     if (s.includes("\\")) return s.replace(/\\+$/, "") || "\\";
     return s.replace(/\/+$/, "") || "/";
   }
@@ -569,12 +580,58 @@
   }
   //#endregion
 
+  //#region desktop-only actions
+  async function onScanComplete(scannedPaths: string[]) {
+    // Scan replaced the DB. Refresh users (list may have changed) and jump
+    // into the scanned path so the user sees the fresh results immediately —
+    // landing on the synthetic root would show only platform roots (e.g.
+    // `C:\`), which visually looks identical to the pre-scan state even
+    // though the stats underneath are fresh.
+    users = await api.getUsers();
+    allColors = getOptimalColors(users.length);
+    userColors = new SvelteMap<string, string>();
+    createUserDropdown(users);
+    selectedUser = "All Users";
+    // If multiple paths were scanned, navigate to the nearest common ancestor
+    // (the synthetic root) so all are visible in the listing. For a single
+    // path, drill straight in.
+    const target = scannedPaths.length === 1 ? scannedPaths[0] : "";
+    // Reset history so Back doesn't return to stale pre-scan state.
+    history = [target];
+    histIdx = 0;
+    setPath(target);
+    fetchFolders(target);
+  }
+
+  async function revealPath(p: string) {
+    try { await api.revealPath(p); } catch (err) { console.error("Reveal failed:", err); }
+  }
+  async function openTerminal(p: string) {
+    try { await api.openTerminal(p); } catch (err) { console.error("Open terminal failed:", err); }
+  }
+  /** Trash-icon click on a row — stage the path for deletion. User reviews
+   *  and confirms from DeletePanel later (via the toolbar button). */
+  function targetForDeletion(p: string, size: number) {
+    addToQueue(p, size);
+    showToast(`Targeted for deletion (${deleteQueue.items.length})`);
+  }
+
+  function showToast(msg: string) {
+    toastMessage = msg;
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+      toastMessage = "";
+      toastTimer = null;
+    }, 2000);
+  }
+  //#endregion
+
   onMount(async () => {
     users = await api.getUsers();
     allColors = getOptimalColors(users.length);
     createUserDropdown(users);
 
-    if (State.isAdmin) {
+    if (__DESKTOP__ || State.isAdmin) {
       selectedUser = "All Users";
     } else {
       selectedUser = State.username;
@@ -612,8 +669,12 @@
     <SortDropdown bind:sortBy />
     <AgeFilter bind:ageFilter onchange={refresh} />
 
+    {#if __DESKTOP__}
+      <ScanPanel onComplete={onScanComplete} />
+    {/if}
+
     <Svelecte
-      disabled={!State.isAdmin}
+      disabled={!__DESKTOP__ && !State.isAdmin}
       bind:value={selectedUser}
       options={userDropdown}
       name="user-select"
@@ -624,7 +685,7 @@
       closeAfterSelect={true}
       deselectMode="native"
       virtualList={true}
-      class="z-20 min-w-40 h-10 border rounded border-gray-500 bg-gray-800 text-white"
+      class="z-20 grow min-w-40 h-10 border rounded border-gray-500 bg-gray-800 text-white"
     />
     {#if !selectedUser || selectedUser === "All Users"}
       <button class="btn" disabled={true}>
@@ -645,6 +706,26 @@
           userDropdown = Array.from(userColors.entries()).map(([user, color]) => ({ user, color }));
         }}
       />
+    {/if}
+
+    {#if __DESKTOP__}
+      <button
+        class="btn relative"
+        onclick={() => (deleteQueue.panelOpen = true)}
+        title="Review delete queue"
+        disabled={deleteQueue.items.length === 0}
+      >
+        <div class="flex items-center gap-1">
+          <span class="material-symbols-outlined">delete_sweep</span>
+          {#if deleteQueue.items.length > 0}
+            <span
+              class="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-red-600 text-white text-[0.65rem] leading-[1.1rem] text-center font-semibold"
+            >
+              {deleteQueue.items.length}
+            </span>
+          {/if}
+        </div>
+      </button>
     {/if}
   </div>
   <div class="flex">
@@ -705,6 +786,16 @@
     </div>
   {:else}
     <div class="flex flex-col gap-2 overflow-y-auto transition-opacity duration-200 p-4">
+      {#if __DESKTOP__ && sortedFolders.length === 0 && sortedfiles.length === 0 && path === ""}
+        <div class="flex flex-col items-center justify-center text-center text-gray-300 py-16 gap-3">
+          <span class="material-symbols-outlined text-6xl opacity-50">travel_explore</span>
+          <div class="text-lg">No data yet</div>
+          <div class="text-sm opacity-70 max-w-md">
+            Click <span class="font-semibold">Scan</span> above to index your filesystem.
+            A scan runs duscan, dusum, and dudb in the background.
+          </div>
+        </div>
+      {/if}
       {#each sortedFolders as folder}
         <FolderBar
           {folder}
@@ -713,6 +804,9 @@
           {userColors}
           onclick={() => navigateTo(folder.path)}
           onCopyPath={copyPath}
+          onReveal={__DESKTOP__ ? revealPath : undefined}
+          onTerminal={__DESKTOP__ ? openTerminal : undefined}
+          onDelete={__DESKTOP__ ? targetForDeletion : undefined}
           onUserHover={showTip}
           onUserMove={moveTip}
           onUserLeave={hideTip}
@@ -726,6 +820,7 @@
           widthPercent={filePct(file)}
           {userColors}
           onCopyPath={copyPath}
+          onDelete={__DESKTOP__ ? targetForDeletion : undefined}
         />
       {/each}
     </div>
@@ -734,6 +829,11 @@
 </div>
 
 <Tooltip {tip} />
+
+{#if __DESKTOP__}
+  <StatusBar />
+  <DeletePanel onChange={refresh} />
+{/if}
 
 {#if api.error}
   <div
@@ -757,5 +857,14 @@
     class:translate-x-0={copyFeedbackVisible}
   >
     Path copied!
+  </div>
+{/if}
+
+{#if toastMessage}
+  <div
+    class="fixed top-1 inset-x-0 mx-auto w-max bg-gray-800 text-gray-100 border border-gray-600 px-4 py-1
+      rounded-lg font-medium shadow-lg z-50"
+  >
+    {toastMessage}
   </div>
 {/if}

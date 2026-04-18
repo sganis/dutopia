@@ -6,9 +6,12 @@
   import { clearAll } from '../ts/cache';
 
   let { children } = $props()
+  // In the desktop build there is no auth — always render the app.
   let authed = $derived(
-      Boolean(State.token)
-    && (!State.expiresAt || Date.now() < State.expiresAt)
+      __DESKTOP__ || (
+        Boolean(State.token)
+      && (!State.expiresAt || Date.now() < State.expiresAt)
+      )
   )
 
   function logout() {
@@ -33,8 +36,8 @@
 
     <div class="grow"></div>
 
-    <!-- NEW: small auth status / logout -->
-    {#if authed}
+    <!-- Auth status / logout — hidden in the desktop build. -->
+    {#if authed && !__DESKTOP__}
       <div class="flex items-center gap-3 text-sm">
         <span class="opacity-80">{State.username}</span>
         {#if State.isAdmin}

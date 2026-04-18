@@ -3,17 +3,20 @@
   Per-row action toolbar.
 
   Lives at the bottom-left of FolderBar / FileBar. Each prop is an optional
-  handler — pass it to render the corresponding icon, omit to hide. To add a
-  new action (e.g. delete, share, open in explorer), add a prop here, render
-  another <Icon>, and wire it up in the parent. Buttons stop propagation so
-  the row's main click handler (folder navigation) is not triggered.
+  handler — pass it to render the corresponding icon, omit to hide. Buttons
+  stop propagation so the row's main click handler (folder navigation) is
+  not triggered.
 -->
 <script lang="ts">
   let {
     onCopy,
+    onReveal,
+    onTerminal,
     onDelete,
   }: {
     onCopy?: () => void;
+    onReveal?: () => void;
+    onTerminal?: () => void;
     onDelete?: () => void;
   } = $props();
 
@@ -34,46 +37,40 @@
       aria-label="Copy path"
       onclick={(e) => handle(e, onCopy)}
     >
-      <!-- Lucide-style copy: two overlapping rounded rects, crisp at small sizes -->
-      <svg
-        viewBox="0 0 24 24"
-        width="12"
-        height="12"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-      </svg>
+      <span class="material-symbols-outlined">content_copy</span>
+    </button>
+  {/if}
+  {#if onReveal}
+    <button
+      type="button"
+      class="action-btn"
+      title="Reveal in file manager"
+      aria-label="Reveal in file manager"
+      onclick={(e) => handle(e, onReveal)}
+    >
+      <span class="material-symbols-outlined">folder_open</span>
+    </button>
+  {/if}
+  {#if onTerminal}
+    <button
+      type="button"
+      class="action-btn"
+      title="Open terminal here"
+      aria-label="Open terminal here"
+      onclick={(e) => handle(e, onTerminal)}
+    >
+      <span class="material-symbols-outlined">terminal</span>
     </button>
   {/if}
   {#if onDelete}
     <button
       type="button"
       class="action-btn action-btn-danger"
-      title="Delete"
-      aria-label="Delete"
+      title="Target for deletion"
+      aria-label="Target for deletion"
       onclick={(e) => handle(e, onDelete)}
     >
-      <svg
-        viewBox="0 0 24 24"
-        width="12"
-        height="12"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M3 6h18"></path>
-        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path>
-        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-      </svg>
+      <span class="material-symbols-outlined">delete</span>
     </button>
   {/if}
 </div>
@@ -89,6 +86,10 @@
     transition: opacity 120ms ease, background-color 120ms ease;
     cursor: pointer;
     color: currentColor;
+  }
+  .action-btn .material-symbols-outlined {
+    font-size: 16px;
+    line-height: 1;
   }
   .action-btn:hover {
     opacity: 1;

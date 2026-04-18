@@ -1,32 +1,47 @@
+// desktop/vite.config.js
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-// @ts-expect-error process is a nodejs global
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+);
+const browserPkg = JSON.parse(
+  readFileSync(new URL("../browser/package.json", import.meta.url), "utf8"),
+);
+
+// Allow `serve` to reach source in both `desktop/` and `../browser/`.
+const browserDir = fileURLToPath(new URL("../browser", import.meta.url));
+
 const host = process.env.TAURI_DEV_HOST;
 
-// https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sveltekit()],
+  plugins: [sveltekit(), tailwindcss()],
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
-  // 1. prevent Vite from obscuring rust errors
-  clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
+  // Vite must serve the parent dir so SvelteKit can reach ../browser/src.
   server: {
+    fs: { allow: [".", browserDir] },
     port: 1420,
     strictPort: true,
     host: host || false,
     hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
+      ? { protocol: "ws", host, port: 1421 }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  clearScreen: false,
+
+  define: {
+    // Shared with browser build. True here so the desktop-only code paths
+    // (ScanPanel, reveal/terminal/delete actions, auth bypass) compile in.
+    __DESKTOP__: "true",
+    __APP_VERSION__: JSON.stringify(browserPkg.version ?? pkg.version),
+  },
+
+  build: { sourcemap: true },
 }));

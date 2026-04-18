@@ -20,12 +20,14 @@
     widthPercent,
     userColors,
     onCopyPath,
+    onDelete,
   }: {
     file: ScannedFile;
     sortBy: SortKey;
     widthPercent: number;
     userColors: SvelteMap<string, string>;
     onCopyPath?: (path: string) => void;
+    onDelete?: (path: string, size: number) => void;
   } = $props();
 
   const toNum = (v: any) => {
@@ -65,7 +67,10 @@
       </div>
       <div class="relative z-10 flex items-center justify-between gap-2">
         <div class="flex items-center gap-2 min-w-0">
-          <ActionBar onCopy={onCopyPath ? () => onCopyPath(file.path) : undefined} />
+          <ActionBar
+            onCopy={onCopyPath ? () => onCopyPath(file.path) : undefined}
+            onDelete={onDelete ? () => onDelete(file.path, toNum(file.size)) : undefined}
+          />
           <span class="truncate">{file.owner}</span>
         </div>
         <div class="text-nowrap">

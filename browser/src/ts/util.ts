@@ -1,6 +1,11 @@
 // browser/src/ts/util.ts
 import { fromUnixTime, formatDistanceToNow, isFuture, format } from "date-fns";
 
+/** True on Windows. NTFS supports hardlinks but the concept isn't meaningful
+ *  to most Windows users, so we hide the "Linked" metric there. */
+export const isWindows =
+  typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+
 export function humanTime(unix: number): string {
   const d = fromUnixTime(unix);
   if (isFuture(d)) {
@@ -53,28 +58,28 @@ export function getParent(inputPath: string): string {
   const s = inputPath.trim();
   if (!s) return "";
 
-  // UNC: \\server or \\server\share\... — server name is the anchor.
+  // UNC: \\server or \\server\share\... — `\\server` itself has the
+  // synthetic root (`""`) as parent so Up button eventually reaches Home.
   if (s.startsWith("\\\\")) {
     const rest = s.slice(2).replace(/\\+$/, "");
     const idx = rest.lastIndexOf("\\");
-    if (idx < 0) return s; // just `\\server`
+    if (idx < 0) return "";
     return "\\\\" + rest.slice(0, idx);
   }
 
-  // Windows drive: `C:\…`
+  // Windows drive: `C:\…`. Drive root's parent is the synthetic root.
   const driveMatch = s.match(/^([a-zA-Z]):(.*)$/);
   if (driveMatch) {
     const drive = driveMatch[1] + ":";
     let rest = driveMatch[2].replace(/\\+$/, "");
-    // `C:\` → parent is itself.
-    if (rest === "" || rest === "\\") return drive + "\\";
+    if (rest === "" || rest === "\\") return "";
     const idx = rest.lastIndexOf("\\");
     if (idx <= 0) return drive + "\\";
     return drive + rest.slice(0, idx);
   }
 
-  // Unix absolute: `/…`
-  if (s === "/") return "/";
+  // Unix absolute: `/…`. `/` has the synthetic root as parent.
+  if (s === "/") return "";
   const trimmed = s.replace(/\/+$/, "");
   const idx = trimmed.lastIndexOf("/");
   if (idx <= 0) return "/";

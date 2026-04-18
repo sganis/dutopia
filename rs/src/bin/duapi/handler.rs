@@ -11,8 +11,8 @@ use std::time::SystemTime;
 
 use dutopia::auth::{keys, AuthBody, AuthError, AuthPayload, Claims};
 
-use crate::db;
-use crate::item::get_items;
+use dutopia::db;
+use dutopia::item::get_items;
 use crate::query::{parse_users_csv, FilesQuery, FolderQuery};
 use crate::{get_db, get_users};
 
@@ -225,9 +225,9 @@ mod tests {
     #[cfg(unix)]
     use tempfile::tempdir;
 
-    use crate::db::FolderOut;
+    use dutopia::db::FolderOut;
     #[cfg(unix)]
-    use crate::item::FsItemOut;
+    use dutopia::item::FsItemOut;
     use crate::{DB_POOL, TEST_DB, USERS};
 
     const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -236,9 +236,9 @@ mod tests {
         if DB_POOL.get().is_some() {
             return;
         }
-        let temp_db = crate::db::test_support::build_test_db();
-        let pool = crate::db::open_pool(&temp_db.path).expect("open_pool");
-        let users = crate::db::list_users(&pool).expect("list_users");
+        let temp_db = dutopia::db::test_support::build_test_db();
+        let pool = dutopia::db::open_pool(&temp_db.path).expect("open_pool");
+        let users = dutopia::db::list_users(&pool).expect("list_users");
         // Keep the TempDb alive for the entire test run so the file is not
         // removed while the pool is still using it.
         let _ = TEST_DB.set(temp_db);
@@ -449,11 +449,11 @@ mod tests {
         init_db_once();
         let pool = DB_POOL.get().unwrap();
 
-        let items = crate::db::list_children(pool, "/", &[], None).unwrap();
+        let items = dutopia::db::list_children(pool, "/", &[], None).unwrap();
         assert!(items.iter().any(|it| it.path == "/docs"));
 
         let items_alice =
-            crate::db::list_children(pool, "/", &["alice".to_string()], None).unwrap();
+            dutopia::db::list_children(pool, "/", &["alice".to_string()], None).unwrap();
         assert!(items_alice.iter().any(|it| it.path == "/docs"));
         let docs = items_alice
             .into_iter()
@@ -461,7 +461,7 @@ mod tests {
             .unwrap();
         assert!(docs.users.contains_key("alice"));
 
-        let items_age2 = crate::db::list_children(pool, "/", &[], Some(2)).unwrap();
+        let items_age2 = dutopia::db::list_children(pool, "/", &[], Some(2)).unwrap();
         let docs2 = items_age2
             .into_iter()
             .find(|it| it.path == "/docs")
