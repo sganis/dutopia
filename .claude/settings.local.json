@@ -27,7 +27,12 @@
       "Bash(python *)",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat build --release --bin duapi\")",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi --bin dudb --lib\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dudb windows_ingest\")"
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dudb windows_ingest\")",
+      "Bash(awk '{print $NF}')",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat update -p aws-lc-sys -p aws-lc-rs -p rustls-webpki -p rand@0.9.4 -p time -p simple_asn1 -p jsonwebtoken\")",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:rustsec.org)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check\")"
     ]
   }
 }
