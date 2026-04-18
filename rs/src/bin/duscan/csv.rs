@@ -49,7 +49,18 @@ pub fn write_row_bin(buf: &mut Vec<u8>, path: &Path, r: &Row, no_atime: bool) {
     let path_bytes: &[u8] = path.as_os_str().as_bytes();
 
     #[cfg(not(unix))]
-    let path_lossy = path.to_string_lossy();
+    let path_lossy = {
+        let raw = path.to_string_lossy();
+        // Match the CSV writer: strip the `\\?\` / `\\?\UNC\` verbatim prefix
+        // but preserve OS-native backslashes.
+        if raw.starts_with(r"\\?\UNC\") {
+            format!(r"\\{}", &raw[8..])
+        } else if raw.starts_with(r"\\?\") {
+            raw[4..].to_string()
+        } else {
+            raw.into_owned()
+        }
+    };
     #[cfg(not(unix))]
     let path_bytes: &[u8] = path_lossy.as_bytes();
 
@@ -112,6 +123,9 @@ pub fn csv_push_bytes_smart_quoted(buf: &mut Vec<u8>, bytes: &[u8]) {
 
 #[cfg(windows)]
 pub fn csv_push_str_smart_quoted(buf: &mut Vec<u8>, s: &str) {
+    // Strip the verbatim `\\?\` prefix but otherwise keep the OS-native form.
+    // Paths in the CSV are exactly what Windows sees: `C:\Users\foo`,
+    // `\\server\share\foo`, etc. — works in cmd.exe without translation.
     let normalized = if s.starts_with(r"\\?\") {
         if s.starts_with(r"\\?\UNC\") {
             format!(r"\\{}", &s[8..])
@@ -217,7 +231,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn test_csv_push_str_smart_quoted_normalize_verbatim() {
+    fn test_csv_push_str_smart_quoted_strips_verbatim_prefix() {
         let mut buf = Vec::new();
         csv_push_str_smart_quoted(&mut buf, r"\\?\C:\foo\bar");
         assert_eq!(std::str::from_utf8(&buf).unwrap(), r"C:\foo\bar");
@@ -225,6 +239,10 @@ mod tests {
         let mut buf2 = Vec::new();
         csv_push_str_smart_quoted(&mut buf2, r"\\?\UNC\server\share\foo");
         assert_eq!(std::str::from_utf8(&buf2).unwrap(), r"\\server\share\foo");
+
+        let mut buf3 = Vec::new();
+        csv_push_str_smart_quoted(&mut buf3, r"C:\Users\foo");
+        assert_eq!(std::str::from_utf8(&buf3).unwrap(), r"C:\Users\foo");
     }
 
     #[test]

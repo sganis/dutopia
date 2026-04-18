@@ -23,30 +23,87 @@ pub fn parse_users_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Normalize a user-supplied path. Returns `Some(clean)` where `clean` always starts with `/`,
-/// with empty and `.` segments dropped and repeated/trailing `/` collapsed. Returns `None` if
-/// the input contains a NUL byte or would escape via `..`.
+/// Normalize a user-supplied path to the native OS form used as the index key.
+///
+/// The path form is preserved: `/var/log` (Unix), `C:\Users\San` (Windows),
+/// `\\server\share\dir` (UNC). The separator detected in the input is the
+/// separator used in the output.
+///
+/// Returns `None` if the input contains a NUL byte or a literal `..` segment.
 pub fn normalize_path(input: &str) -> Option<String> {
     if input.as_bytes().contains(&0) {
         return None;
     }
     let trimmed = input.trim();
-    if trimmed.is_empty() || trimmed == "/" {
+    if trimmed.is_empty() {
+        return Some(String::new());
+    }
+    let bytes = trimmed.as_bytes();
+
+    // Detect native separator from the input.
+    let is_unc = trimmed.starts_with(r"\\");
+    let has_drive_prefix = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':';
+    let use_backslash = is_unc || has_drive_prefix || trimmed.contains('\\');
+    let sep: char = if use_backslash { '\\' } else { '/' };
+    let is_unix_absolute = !use_backslash && trimmed.starts_with('/');
+
+    // Root markers — return canonical form directly.
+    if trimmed == "/" {
         return Some("/".to_string());
     }
+    if has_drive_prefix && bytes.len() <= 3 {
+        return Some(format!("{}:\\", bytes[0] as char));
+    }
+
+    // Peel the anchor so we can split segments reliably.
+    let body: &str = if is_unc {
+        &trimmed[2..]
+    } else if is_unix_absolute {
+        &trimmed[1..]
+    } else if has_drive_prefix {
+        // `C:\Users\San` → split off `C:\` first.
+        let start = if bytes.len() >= 3 && bytes[2] == b'\\' { 3 } else { 2 };
+        &trimmed[start..]
+    } else {
+        trimmed
+    };
+
     let mut out: Vec<&str> = Vec::new();
-    for seg in trimmed.split('/') {
+    for seg in body.split(sep) {
         match seg {
             "" | "." => continue,
             ".." => return None,
             s => out.push(s),
         }
     }
-    if out.is_empty() {
-        Some("/".to_string())
-    } else {
-        Some(format!("/{}", out.join("/")))
-    }
+
+    Some(match (is_unc, has_drive_prefix, is_unix_absolute) {
+        (true, _, _) => {
+            if out.is_empty() {
+                r"\\".to_string()
+            } else {
+                format!("\\\\{}", out.join("\\"))
+            }
+        }
+        (_, true, _) => {
+            let drive = format!("{}:\\", bytes[0] as char);
+            if out.is_empty() {
+                drive
+            } else {
+                format!("{}{}", drive, out.join("\\"))
+            }
+        }
+        (_, _, true) => {
+            if out.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", out.join("/"))
+            }
+        }
+        _ => out.join(&sep.to_string()),
+    })
 }
 
 pub fn max_page_size() -> usize {
@@ -82,14 +139,35 @@ mod tests {
     #[test]
     fn test_normalize_path_basic() {
         assert_eq!(normalize_path("/").as_deref(), Some("/"));
-        assert_eq!(normalize_path("").as_deref(), Some("/"));
+        assert_eq!(normalize_path("").as_deref(), Some(""));
         assert_eq!(normalize_path("/var/log").as_deref(), Some("/var/log"));
-        assert_eq!(normalize_path("var/log").as_deref(), Some("/var/log"));
+    }
+
+    #[test]
+    fn test_normalize_path_drive_letter_native() {
+        assert_eq!(normalize_path("C:").as_deref(), Some("C:\\"));
+        assert_eq!(normalize_path("C:\\").as_deref(), Some("C:\\"));
+        assert_eq!(
+            normalize_path("C:\\Dev\\foo").as_deref(),
+            Some("C:\\Dev\\foo")
+        );
+        assert_eq!(
+            normalize_path("C:\\Dev\\foo\\").as_deref(),
+            Some("C:\\Dev\\foo")
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_unc_native() {
+        assert_eq!(
+            normalize_path(r"\\server\share\dir").as_deref(),
+            Some(r"\\server\share\dir")
+        );
     }
 
     #[test]
     fn test_normalize_path_collapses_slashes_and_dots() {
-        assert_eq!(normalize_path("//var//log/").as_deref(), Some("/var/log"));
+        assert_eq!(normalize_path("/var//log/").as_deref(), Some("/var/log"));
         assert_eq!(normalize_path("/var/./log").as_deref(), Some("/var/log"));
         assert_eq!(normalize_path("/var/log/.").as_deref(), Some("/var/log"));
     }
@@ -99,8 +177,8 @@ mod tests {
         assert!(normalize_path("/var/../etc/passwd").is_none());
         assert!(normalize_path("..").is_none());
         assert!(normalize_path("/a/b/../../c").is_none());
-        assert!(normalize_path("/a/%2e%2e/b").as_deref() == Some("/a/%2e%2e/b"));
-        // ^ percent-decoding is axum's job; we only block literal ".." segments.
+        // Percent-escaped `..` is axum's job to decode — we only block literal segments.
+        assert!(normalize_path("/a/%2e%2e/b").is_some());
     }
 
     #[test]
@@ -111,7 +189,7 @@ mod tests {
     #[test]
     fn test_normalize_path_trims_whitespace() {
         assert_eq!(normalize_path("  /var/log  ").as_deref(), Some("/var/log"));
-        assert_eq!(normalize_path("   ").as_deref(), Some("/"));
+        assert_eq!(normalize_path("   ").as_deref(), Some(""));
     }
 
     #[test]

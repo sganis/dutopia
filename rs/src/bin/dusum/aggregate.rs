@@ -4,46 +4,99 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CStr;
 
-/// Convert path bytes into a list of ancestor folder paths:
-///  "/a/b/file.txt" -> ["/", "/a", "/a/b"]
-pub fn get_folder_ancestors(path: &[u8]) -> Vec<Vec<u8>> {
-    let normalized: Vec<u8> = path
-        .iter()
-        .map(|&b| if b == b'\\' { b'/' } else { b })
-        .collect();
+/// Pick the native separator byte for a raw path. A backslash anywhere in the
+/// path (or a drive-letter prefix) means Windows-native; otherwise Unix.
+fn separator(path: &[u8]) -> u8 {
+    if path.iter().any(|&b| b == b'\\') {
+        return b'\\';
+    }
+    if path.len() >= 2 && path[0].is_ascii_alphabetic() && path[1] == b':' {
+        return b'\\';
+    }
+    b'/'
+}
 
-    let parent_end = normalized.iter().rposition(|&b| b == b'/');
+/// Trim trailing separator characters, preserving OS-native form.
+///   `C:\Users\Default\` → `C:\Users\Default`
+///   `/var/log/`         → `/var/log`
+///   `C:\`               → `C:\`   (drive root keeps the trailing sep)
+///   `/`                 → `/`     (root keeps the separator)
+pub fn normalize_folder_bytes(path: &[u8]) -> Vec<u8> {
+    let sep = separator(path);
+    let mut out: Vec<u8> = path.to_vec();
+
+    // Protect drive-letter roots: a lone `C:\` or `C:` stays as-is.
+    let is_drive_root = out.len() <= 3
+        && out.get(0).map_or(false, |b| b.is_ascii_alphabetic())
+        && out.get(1) == Some(&b':');
+
+    while out.len() > 1 && !is_drive_root && out.last() == Some(&sep) {
+        out.pop();
+    }
+    out
+}
+
+/// Convert a file path into its list of ancestor folder paths, outer→inner,
+/// preserving OS-native separators.
+///   `/a/b/file.txt`         → [`/`, `/a`, `/a/b`]
+///   `C:\Users\San\foo.txt`  → [`C:\`, `C:\Users`, `C:\Users\San`]
+///   `\\srv\shr\dir\f.txt`   → [`\\srv`, `\\srv\shr`, `\\srv\shr\dir`]
+pub fn get_folder_ancestors(path: &[u8]) -> Vec<Vec<u8>> {
+    let sep = separator(path);
+
+    let parent_end = path.iter().rposition(|&b| b == sep);
 
     let folder = match parent_end {
-        Some(0) | None => return vec![b"/".to_vec()],
-        Some(pos) => &normalized[..pos],
+        None => return Vec::new(),
+        Some(0) => {
+            // File lives directly under root ("/" on Unix, or "\" which only
+            // arises in malformed Windows input).
+            return vec![vec![sep]];
+        }
+        Some(pos) => &path[..pos],
     };
 
     let mut folder = folder.to_vec();
-    while folder.len() > 1 && folder.last() == Some(&b'/') {
+    while folder.len() > 1 && folder.last() == Some(&sep) {
         folder.pop();
     }
 
-    let mut ancestors = vec![b"/".to_vec()];
+    let mut ancestors: Vec<Vec<u8>> = Vec::new();
 
-    let trimmed = if folder.starts_with(&[b'/']) {
-        &folder[1..]
+    // Unix absolute path: "/…" — root `/` is itself an ancestor.
+    // UNC: "\\server\share\…" — server + share are the first two ancestors.
+    // Drive-letter: "C:\…" — the drive root "C:\" is the first ancestor.
+    // Relative: no anchor; first segment is the first ancestor.
+    let (prefix, rest): (Vec<u8>, &[u8]) = if sep == b'/' && folder.starts_with(b"/") {
+        ancestors.push(b"/".to_vec());
+        (b"/".to_vec(), &folder[1..])
+    } else if sep == b'\\' && folder.starts_with(b"\\\\") {
+        (b"\\\\".to_vec(), &folder[2..])
+    } else if sep == b'\\'
+        && folder.len() >= 2
+        && folder[0].is_ascii_alphabetic()
+        && folder[1] == b':'
+    {
+        // Build the drive root `C:\` as the first ancestor.
+        let drive_root = vec![folder[0], b':', b'\\'];
+        ancestors.push(drive_root.clone());
+        let rest = if folder.len() >= 3 && folder[2] == b'\\' {
+            &folder[3..]
+        } else {
+            &folder[2..]
+        };
+        (drive_root, rest)
     } else {
-        &folder[..]
+        (Vec::new(), &folder[..])
     };
-    if trimmed.is_empty() {
-        return ancestors;
-    }
 
-    let mut current_path = Vec::new();
-    current_path.push(b'/');
-
-    for segment in trimmed.split(|&b| b == b'/').filter(|s| !s.is_empty()) {
-        if current_path.len() > 1 {
-            current_path.push(b'/');
+    let mut current: Vec<u8> = prefix;
+    for segment in rest.split(|&b| b == sep).filter(|s| !s.is_empty()) {
+        if !current.is_empty() && current.last() != Some(&sep) {
+            current.push(sep);
         }
-        current_path.extend_from_slice(segment);
-        ancestors.push(current_path.clone());
+        current.extend_from_slice(segment);
+        ancestors.push(current.clone());
     }
 
     ancestors
@@ -82,8 +135,15 @@ pub fn get_username_from_uid(uid: u32) -> String {
 }
 
 #[cfg(not(unix))]
-pub fn get_username_from_uid(uid: u32) -> String {
-    uid.to_string()
+pub fn get_username_from_uid(_uid: u32) -> String {
+    // Windows duscan does not record per-file ownership yet (uid is always 0).
+    // Use the interactive user as a stand-in so the duapi per-user filter has
+    // something that matches the login identity. Falls back to "UNK" if the
+    // environment is missing USERNAME (e.g. running as a service).
+    std::env::var("USERNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "UNK".to_string())
 }
 
 #[cfg(test)]
@@ -133,15 +193,27 @@ mod tests {
     }
 
     #[test]
-    fn ancestors_windows_backslashes_normalized() {
+    fn ancestors_windows_native_backslashes() {
         let res = get_folder_ancestors(b"C:\\a\\b\\file.txt");
         assert_eq!(
             res,
             vec![
-                b"/".to_vec(),
-                b"/C:".to_vec(),
-                b"/C:/a".to_vec(),
-                b"/C:/a/b".to_vec()
+                b"C:\\".to_vec(),
+                b"C:\\a".to_vec(),
+                b"C:\\a\\b".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn ancestors_unc_native() {
+        let res = get_folder_ancestors(b"\\\\server\\share\\dir\\file.txt");
+        assert_eq!(
+            res,
+            vec![
+                b"\\\\server".to_vec(),
+                b"\\\\server\\share".to_vec(),
+                b"\\\\server\\share\\dir".to_vec(),
             ]
         );
     }
@@ -154,8 +226,9 @@ mod tests {
 
     #[test]
     fn ancestors_handles_relative_paths() {
+        // No path separator at all: no ancestor folders.
         let res = get_folder_ancestors(b"file.txt");
-        assert_eq!(res, vec![b"/".to_vec()]);
+        assert!(res.is_empty());
     }
 
     #[test]
@@ -176,5 +249,34 @@ mod tests {
     fn ancestors_single_level_path() {
         let res = get_folder_ancestors(b"/a/file.txt");
         assert_eq!(res, vec![b"/".to_vec(), b"/a".to_vec()]);
+    }
+
+    #[test]
+    fn ancestors_drive_root_file() {
+        let res = get_folder_ancestors(b"C:\\foo.txt");
+        assert_eq!(res, vec![b"C:\\".to_vec()]);
+    }
+
+    #[test]
+    fn normalize_folder_bytes_basic() {
+        assert_eq!(normalize_folder_bytes(b"/a/b"), b"/a/b".to_vec());
+        assert_eq!(normalize_folder_bytes(b"/a/b/"), b"/a/b".to_vec());
+        assert_eq!(normalize_folder_bytes(b"a/b"), b"a/b".to_vec());
+        assert_eq!(normalize_folder_bytes(b"/"), b"/".to_vec());
+        assert_eq!(normalize_folder_bytes(b""), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn normalize_folder_bytes_windows_native() {
+        assert_eq!(
+            normalize_folder_bytes(b"C:\\Users\\Default"),
+            b"C:\\Users\\Default".to_vec()
+        );
+        assert_eq!(
+            normalize_folder_bytes(b"C:\\Users\\Default\\"),
+            b"C:\\Users\\Default".to_vec()
+        );
+        // Drive root keeps its trailing backslash.
+        assert_eq!(normalize_folder_bytes(b"C:\\"), b"C:\\".to_vec());
     }
 }

@@ -35,67 +35,50 @@ export function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
-export function getParent(inputPath) {
-  if (!inputPath || typeof inputPath !== 'string') {
-    return '.';
+/**
+ * Return the parent folder of a native-form path. Separator is preserved:
+ *   `C:\Users\San`        -> `C:\Users`
+ *   `C:\Users`            -> `C:\`
+ *   `C:\`                 -> `C:\`       (drive root is its own parent)
+ *   `\\server\share\dir`  -> `\\server\share`
+ *   `\\server\share`      -> `\\server`
+ *   `\\server`            -> `\\server`
+ *   `/var/log/x`          -> `/var/log`
+ *   `/var`                -> `/`
+ *   `/`                   -> `/`
+ *   `""` (trie root)      -> `""`
+ */
+export function getParent(inputPath: string): string {
+  if (!inputPath || typeof inputPath !== "string") return "";
+  const s = inputPath.trim();
+  if (!s) return "";
+
+  // UNC: \\server or \\server\share\... — server name is the anchor.
+  if (s.startsWith("\\\\")) {
+    const rest = s.slice(2).replace(/\\+$/, "");
+    const idx = rest.lastIndexOf("\\");
+    if (idx < 0) return s; // just `\\server`
+    return "\\\\" + rest.slice(0, idx);
   }
 
-  let s = inputPath.trim();
-
-  // Normalize separators - convert all to forward slashes for processing
-  s = s.replace(/\\/g, '/');
-
-  // Detect if this is a Windows path (has drive letter)
-  const isWindows = /^[a-zA-Z]:/.test(s);
-
-  // Handle Windows drive root cases
-  if (isWindows) {
-    // "C:" -> "C:/"
-    if (/^[a-zA-Z]:$/.test(s)) {
-      s += '/';
-    }
-    // "C:/" is root, return as-is (will be converted back to backslashes)
-    if (/^[a-zA-Z]:\/$/.test(s)) {
-      return s.replace(/\//g, '\\');
-    }
-  } else {
-    // Unix root case
-    if (s === '/') {
-      return '/';
-    }
+  // Windows drive: `C:\…`
+  const driveMatch = s.match(/^([a-zA-Z]):(.*)$/);
+  if (driveMatch) {
+    const drive = driveMatch[1] + ":";
+    let rest = driveMatch[2].replace(/\\+$/, "");
+    // `C:\` → parent is itself.
+    if (rest === "" || rest === "\\") return drive + "\\";
+    const idx = rest.lastIndexOf("\\");
+    if (idx <= 0) return drive + "\\";
+    return drive + rest.slice(0, idx);
   }
 
-  // Remove trailing slashes
-  s = s.replace(/\/+$/, '');
-
-  // Split by forward slash (already normalized)
-  const parts = s.split('/');
-
-  if (parts.length <= 1) {
-    return '.';
-  }
-
-  // Remove the last part
-  parts.pop();
-
-  let parent = parts.join('/');
-
-  // Handle Windows drive roots - ensure they end with backslash
-  if (isWindows && /^[a-zA-Z]:$/.test(parent)) {
-    parent += '/';
-  }
-
-  // Handle empty parent (shouldn't happen with proper paths)
-  if (!parent) {
-    return isWindows ? 'C:\\' : '/';
-  }
-
-  // Convert back to appropriate separators
-  if (isWindows) {
-    parent = parent.replace(/\//g, '\\');
-  }
-
-  return parent;
+  // Unix absolute: `/…`
+  if (s === "/") return "/";
+  const trimmed = s.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  if (idx <= 0) return "/";
+  return trimmed.slice(0, idx);
 }
 
 export function capitalize(str) {

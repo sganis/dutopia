@@ -128,6 +128,39 @@ where
     }
 }
 
+/// Outcome of `verify_credentials`. `authenticated` is true when either the
+/// platform verifier accepted the credentials or the `ADMIN_PASSWORD` test
+/// bypass matched. `admin_override` is true only when the bypass granted
+/// access, so the caller can escalate to `is_admin` without consulting
+/// `ADMIN_GROUP`.
+pub struct VerifyResult {
+    pub authenticated: bool,
+    pub admin_override: bool,
+}
+
+/// Verify credentials with an optional test-mode bypass.
+///
+/// If the `ADMIN_PASSWORD` env var is set to a non-empty value and the
+/// supplied password matches it, authentication succeeds for any username
+/// *and* the returned result carries `admin_override = true`. Intended
+/// strictly for local development and CI — do NOT set `ADMIN_PASSWORD` in
+/// production.
+pub fn verify_credentials(username: &str, password: &str) -> VerifyResult {
+    if let Ok(expected) = std::env::var("ADMIN_PASSWORD") {
+        if !expected.is_empty() && password == expected {
+            tracing::warn!(user = %username, "verify_credentials: ADMIN_PASSWORD override matched");
+            return VerifyResult {
+                authenticated: true,
+                admin_override: true,
+            };
+        }
+    }
+    VerifyResult {
+        authenticated: platform::verify_user(username, password),
+        admin_override: false,
+    }
+}
+
 // #[cfg(target_os = "macos")]
 // pub mod platform {
 //     use pam::Authenticator;
@@ -221,9 +254,15 @@ pub mod platform {
 pub mod platform {
     use std::env;
 
-    // Fake auth: defaults admin/admin, override with env vars.
+    /// Fake auth. The username must match the interactive Windows user (so it
+    /// lines up with what dusum stored as the file owner). Override either the
+    /// expected user or password via `FAKE_USER` / `FAKE_PASSWORD` for tests.
     pub fn verify_user(username: &str, password: &str) -> bool {
-        let expected_user = env::var("FAKE_USER").unwrap_or_else(|_| "admin".to_string());
+        let expected_user = env::var("FAKE_USER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| env::var("USERNAME").ok().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "admin".to_string());
         let expected_pass = env::var("FAKE_PASSWORD").unwrap_or_else(|_| "admin".to_string());
         username == expected_user && password == expected_pass
     }
@@ -239,6 +278,45 @@ mod tests {
         // su will fail for a non-existent user; we just want to confirm the function
         // returns `false` rather than panicking after the println! → tracing migration.
         assert!(!verify_user("definitely_not_a_real_user_xyz", "wrong"));
+    }
+}
+
+#[cfg(test)]
+mod admin_override_tests {
+    use super::verify_credentials;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn admin_password_bypass_matches_and_grants_admin() {
+        // SAFETY: serial test isolates env mutation.
+        unsafe { std::env::set_var("ADMIN_PASSWORD", "s3cret") };
+        let r = verify_credentials("anyuser", "s3cret");
+        assert!(r.authenticated);
+        assert!(r.admin_override);
+        unsafe { std::env::remove_var("ADMIN_PASSWORD") };
+    }
+
+    #[test]
+    #[serial]
+    fn admin_password_bypass_ignored_when_empty() {
+        unsafe { std::env::set_var("ADMIN_PASSWORD", "") };
+        // Empty ADMIN_PASSWORD must not accept an empty password; falls through
+        // to the platform verifier, which will fail for a garbage user.
+        let r = verify_credentials("definitely_not_a_real_user_xyz", "");
+        assert!(!r.authenticated);
+        assert!(!r.admin_override);
+        unsafe { std::env::remove_var("ADMIN_PASSWORD") };
+    }
+
+    #[test]
+    #[serial]
+    fn admin_password_wrong_value_does_not_bypass() {
+        unsafe { std::env::set_var("ADMIN_PASSWORD", "expected") };
+        let r = verify_credentials("definitely_not_a_real_user_xyz", "wrong");
+        assert!(!r.authenticated);
+        assert!(!r.admin_override);
+        unsafe { std::env::remove_var("ADMIN_PASSWORD") };
     }
 }
 

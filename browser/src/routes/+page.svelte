@@ -69,8 +69,9 @@
 
   //#region state
   let allColors: string[] = [];
-  let path = $state("/");
-  let fullPath = $state("/");
+  // Empty string = synthetic trie root (lists drives on Windows, `/` on Unix).
+  let path = $state("");
+  let fullPath = $state("");
   let folders = $state<FolderItem[]>([]);
   let files = $state<ScannedFile[]>([]);
   let loading = $state(false);
@@ -78,7 +79,7 @@
   let progress_current = $state(0);
   let progress_total = $state(0);
   let progress_percent = $state(0);
-  let history = $state<string[]>(["/"]);
+  let history = $state<string[]>([""]);
   let histIdx = $state(0);
   let sortBy = $state<SortKey>("disk");
   let ageFilter = $state<AgeFilterType>(-1);
@@ -431,7 +432,8 @@
       const userFilter: string[] = selectedUser === "All Users" ? [] : [selectedUser];
       const raw: RawFolder[] = await api.getFolders(_p, userFilter, ageFilter);
       folders = transformFolders(raw, ageFilter);
-      files = await api.getFiles(_p, userFilter, ageFilter);
+      // /api/files is a live directory walk and rejects the roots ("", "/").
+      files = _p === "" || _p === "/" ? [] : await api.getFiles(_p, userFilter, ageFilter);
     } finally {
       loading = false;
     }
@@ -457,7 +459,9 @@
   }
 
   function goHome() {
-    navigateTo("/");
+    // Empty path = synthetic trie root; lists top-level entries (drives on
+    // Windows, `/` on Unix).
+    navigateTo("");
   }
 
   function goUp() {
@@ -488,18 +492,19 @@
   //#endregion
 
   //#region path
-  function setPath(newPath) {
+  function setPath(newPath: string) {
     const displayedPath = displayPath(newPath);
     fullPath = displayedPath;
     path = isEditing ? displayedPath : truncatePathFromStart(displayedPath);
   }
 
-  function truncatePathFromStart(inputPath, maxLength = 50) {
+  function truncatePathFromStart(inputPath: string, maxLength = 50): string {
     if (!inputPath || inputPath.length <= maxLength) return inputPath;
-    const parts = inputPath.split("/");
+    const sep = inputPath.includes("\\") ? "\\" : "/";
+    const parts = inputPath.split(sep);
     let result = parts[parts.length - 1];
     for (let i = parts.length - 2; i >= 0; i--) {
-      const potential = parts[i] + "/" + result;
+      const potential = parts[i] + sep + result;
       if (("..." + potential).length > maxLength) break;
       result = potential;
     }
@@ -513,16 +518,23 @@
 
   function onPathBlur() {
     isEditing = false;
-    if (path && !path.startsWith("...")) fullPath = path;
+    if (path && !path.startsWith("...")) fullPath = displayPath(path);
     if (fullPath) path = truncatePathFromStart(fullPath);
   }
 
+  /**
+   * Minimal normalization: trim trailing separators, preserve OS-native form.
+   *   `C:\Users\San\` -> `C:\Users\San`
+   *   `/var/log/`     -> `/var/log`
+   *   `/`             -> `/`
+   *   empty           -> ``       (synthetic trie root)
+   */
   function displayPath(p: string): string {
-    if (!p) return "/";
-    let s = p.replace(/\\/g, "/");
-    if (s !== "/") s = s.replace(/\/+$/, "");
-    if (!s.startsWith("/")) s = "/" + s;
-    return s || "/";
+    if (!p) return "";
+    const s = p.trim();
+    if (s === "/" || s === "\\") return s;
+    if (s.includes("\\")) return s.replace(/\\+$/, "") || "\\";
+    return s.replace(/\/+$/, "") || "/";
   }
 
   function onPathKeydown(e: KeyboardEvent) {
@@ -567,7 +579,7 @@
 
 <div class="flex flex-col h-screen min-h-0 gap-2 p-2">
   <div class="flex gap-2 items-center relative select-none">
-    <button class="btn" onclick={goHome} title="Go to Root Folder" disabled={histIdx === 0 || fullPath === "/"}>
+    <button class="btn" onclick={goHome} title="Go to Root Folder" disabled={fullPath === ""}>
       <div class="flex items-center">
         <span class="material-symbols-outlined">home</span>
       </div>

@@ -26,7 +26,8 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
         return Err(AuthError::MissingCredentials);
     }
 
-    if !dutopia::auth::platform::verify_user(&payload.username, &payload.password) {
+    let verify = dutopia::auth::verify_credentials(&payload.username, &payload.password);
+    if !verify.authenticated {
         return Err(AuthError::WrongCredentials);
     }
 
@@ -44,9 +45,12 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
         .filter(|s| !s.is_empty())
         .collect();
 
+    let is_admin = verify.admin_override
+        || admins.contains(&payload.username.trim().to_ascii_lowercase());
+
     let claims = Claims {
         sub: payload.username.to_owned(),
-        is_admin: admins.contains(&payload.username.trim().to_ascii_lowercase()),
+        is_admin,
         exp: exp.try_into().unwrap(),
     };
     tracing::info!(user = %claims.sub, is_admin = claims.is_admin, "login success");
@@ -132,11 +136,11 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 tracing::warn!(input = %raw, "400 Bad Request /api/files rejected path");
                 return (StatusCode::BAD_REQUEST, "invalid path").into_response();
             }
-            Some(p) if p == "/" => {
-                tracing::warn!("400 Bad Request /api/files path '/' not allowed");
+            Some(p) if p == "/" || p.is_empty() => {
+                tracing::warn!(path = %p, "400 Bad Request /api/files root not allowed");
                 return (
                     StatusCode::BAD_REQUEST,
-                    "path '/' not allowed for /api/files",
+                    "root path not allowed for /api/files",
                 )
                     .into_response();
             }
@@ -174,16 +178,8 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 .into_response()
         }
         Ok(Err(e)) => {
-            #[cfg(not(unix))]
-            {
-                tracing::warn!(err = %e, "501 Not Implemented /api/files");
-                (StatusCode::NOT_IMPLEMENTED, e.to_string()).into_response()
-            }
-            #[cfg(unix)]
-            {
-                tracing::warn!(err = %e, "400 Bad Request /api/files");
-                (StatusCode::BAD_REQUEST, e.to_string()).into_response()
-            }
+            tracing::warn!(err = %e, "400 Bad Request /api/files");
+            (StatusCode::BAD_REQUEST, e.to_string()).into_response()
         }
         Ok(Ok(mut items)) => {
             let cap = crate::query::max_page_size();

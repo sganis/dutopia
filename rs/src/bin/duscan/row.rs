@@ -32,10 +32,21 @@ pub fn row_from_metadata(md: &fs::Metadata) -> Row {
         let mtime = md.modified().ok().map(to_unix).unwrap_or(0);
         let blocks = (md.len() + 511) / 512;
 
+        // Encode just enough type info for downstream POSIX-style mode parsing in dusum.
+        // S_IFDIR = 0o040000, S_IFLNK = 0o120000, S_IFREG = 0o100000.
+        let ft = md.file_type();
+        let mode: u32 = if ft.is_dir() {
+            0o040000
+        } else if ft.is_symlink() {
+            0o120000
+        } else {
+            0o100000
+        };
+
         Row {
             dev: 0,
             ino: 0,
-            mode: 0,
+            mode,
             uid: 0,
             gid: 0,
             size: md.len(),
@@ -95,7 +106,8 @@ mod tests {
             assert_eq!(row.ino, 0);
             assert_eq!(row.uid, 0);
             assert_eq!(row.gid, 0);
-            assert_eq!(row.mode, 0);
+            // Regular file: S_IFREG
+            assert_eq!(row.mode, 0o100000);
         }
     }
 
@@ -130,6 +142,13 @@ mod tests {
         {
             let row = row.unwrap();
             assert!(row.mode > 0);
+        }
+
+        #[cfg(windows)]
+        {
+            let row = row.unwrap();
+            // Directory: S_IFDIR
+            assert_eq!(row.mode & 0o170000, 0o040000);
         }
     }
 

@@ -11,7 +11,7 @@ mod aggregate;
 mod output;
 mod stats;
 
-use aggregate::{get_folder_ancestors, resolve_user};
+use aggregate::{get_folder_ancestors, normalize_folder_bytes, resolve_user};
 use output::{count_lines, write_results, write_unknown_uids};
 use stats::{age_bucket, parse_age_pair, sanitize_mtime, AgeCfg, UserStats};
 
@@ -106,6 +106,10 @@ fn main() -> Result<()> {
         };
 
         let inode_bytes = record.get(0).unwrap_or(b"").to_vec();
+        // Sentinel "0-0" means the scanner had no inode info (Windows).
+        // Treat every such row as a distinct file so the hardlink-dedup below
+        // does not collapse all but the first row into linked_size.
+        let has_inode = inode_bytes.as_slice() != b"0-0" && !inode_bytes.is_empty();
         let mode = parse_int::<u32>(record.get(5));
         let is_dir = (mode & S_IFMT) == S_IFDIR;
         let raw_atime = parse_int::<i64>(record.get(1));
@@ -124,7 +128,9 @@ fn main() -> Result<()> {
         let file_size = parse_int::<u64>(record.get(6));
         let raw_disk = parse_int::<u64>(record.get(7));
 
-        let (disk_size, linked_size) = if seen_inodes.insert(inode_bytes) {
+        let (disk_size, linked_size) = if !has_inode {
+            (raw_disk, 0)
+        } else if seen_inodes.insert(inode_bytes) {
             (raw_disk, 0)
         } else {
             (0, raw_disk)
@@ -138,7 +144,15 @@ fn main() -> Result<()> {
 
         let bucket = age_bucket(now_ts, sanitized_mtime, age_cfg);
 
-        for folder_path in get_folder_ancestors(path_bytes) {
+        let mut folder_paths = get_folder_ancestors(path_bytes);
+        if is_dir {
+            let self_path = normalize_folder_bytes(path_bytes);
+            if !self_path.is_empty() && !folder_paths.iter().any(|p| p == &self_path) {
+                folder_paths.push(self_path);
+            }
+        }
+
+        for folder_path in folder_paths {
             let key = (folder_path, user.clone(), bucket);
             aggregated_data.entry(key).or_default().update(
                 file_size,

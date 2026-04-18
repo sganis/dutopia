@@ -181,8 +181,21 @@ impl InMemoryFSIndex {
         let base_path = Self::normalize_path(dir_path);
 
         for (child_name, _child_node) in &current.children {
-            let full_path = if base_path.is_empty() || base_path == "/" {
+            // Top-level listing (trie root): each child is already a full
+            // path key (`C:\`, `/`, `\\server`).
+            // Unix root `/`: just prepend `/`.
+            // Windows drive root `C:\` or `\\server`: child already has the
+            // separator context — append without a separator. Drive-root keeps
+            // its trailing `\`; UNC server paths need a `\` added.
+            // Otherwise join with the native separator of the base.
+            let full_path = if base_path.is_empty() {
+                child_name.clone()
+            } else if base_path == "/" {
                 format!("/{}", child_name)
+            } else if base_path.ends_with('\\') {
+                format!("{}{}", base_path, child_name)
+            } else if base_path.contains('\\') {
+                format!("{}\\{}", base_path, child_name)
             } else {
                 format!("{}/{}", base_path.trim_end_matches('/'), child_name)
             };
@@ -255,8 +268,54 @@ impl InMemoryFSIndex {
         Ok(items)
     }
 
+    /// Split a path into trie components using the path's own native separator.
+    /// The drive-root component for Windows is `C:\` (keeps the trailing sep
+    /// so it's unambiguous). UNC server-name keeps its `\\` prefix.
     pub fn path_to_components(path: &str) -> Vec<String> {
         let normalized = Self::normalize_path(path);
+        let bytes = normalized.as_bytes();
+
+        // Detect native separator from the path itself.
+        let backslash = bytes.contains(&b'\\')
+            || (bytes.len() >= 2
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':');
+
+        if backslash {
+            // UNC: `\\server\share\dir` → ["\\server", "share", "dir"]
+            if let Some(rest) = normalized.strip_prefix(r"\\") {
+                let mut parts: Vec<String> = rest
+                    .split('\\')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                if !parts.is_empty() {
+                    parts[0] = format!(r"\\{}", parts[0]);
+                }
+                return parts;
+            }
+            // Drive: `C:\Dev\foo` → ["C:\\", "Dev", "foo"]
+            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                let drive_root = format!("{}:\\", bytes[0] as char);
+                let rest_start = if bytes.len() >= 3 && bytes[2] == b'\\' { 3 } else { 2 };
+                let mut parts: Vec<String> = vec![drive_root];
+                parts.extend(
+                    normalized[rest_start..]
+                        .split('\\')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string()),
+                );
+                return parts;
+            }
+            // Fallback: split on backslash.
+            return normalized
+                .split('\\')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+        }
+
+        // Unix: split on forward slash.
         normalized
             .split('/')
             .filter(|s| !s.is_empty())
@@ -264,24 +323,39 @@ impl InMemoryFSIndex {
             .collect()
     }
 
+    /// Normalize a query path: trim trailing separators (except for the
+    /// root markers `/` and `C:\` / `\\server`). Preserves OS-native form.
     pub fn normalize_path(path: &str) -> String {
-        let mut normalized = path.replace('\\', "/");
-        if cfg!(windows) && normalized.len() >= 2 && normalized.chars().nth(1) == Some(':') {
-            if !normalized.starts_with('/') {
-                normalized = format!("/{}", normalized);
-            }
-        } else if !normalized.starts_with('/') && !normalized.is_empty() {
-            normalized = format!("/{}", normalized);
+        let mut out = path.to_string();
+        let bytes = out.as_bytes();
+
+        // Drive-letter root `C:\` or `C:` — keep as-is.
+        let is_drive_root = bytes.len() <= 3
+            && bytes.get(0).map_or(false, |b| b.is_ascii_alphabetic())
+            && bytes.get(1) == Some(&b':');
+        if is_drive_root {
+            // Normalize `C:` and `C:\` both to `C:\`.
+            let drive = bytes[0] as char;
+            return format!("{}:\\", drive);
         }
-        normalized
+
+        // Detect separator for trimming.
+        let backslash = out.contains('\\');
+
+        if backslash {
+            while out.len() > 1 && out.ends_with('\\') {
+                out.pop();
+            }
+        } else {
+            while out.len() > 1 && out.ends_with('/') {
+                out.pop();
+            }
+        }
+        out
     }
 
     pub fn canonical_key(path: &str) -> String {
-        let mut n = Self::normalize_path(path);
-        if n.len() > 1 {
-            n = n.trim_end_matches('/').to_string();
-        }
-        n
+        Self::normalize_path(path)
     }
 }
 
@@ -335,8 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_and_canonical() {
-        assert_eq!(InMemoryFSIndex::normalize_path("foo/bar"), "/foo/bar");
+    fn test_normalize_and_canonical_unix() {
+        assert_eq!(InMemoryFSIndex::normalize_path("foo/bar"), "foo/bar");
         assert_eq!(InMemoryFSIndex::canonical_key("/foo/bar/"), "/foo/bar");
         assert_eq!(
             InMemoryFSIndex::path_to_components("/a/b/c"),
@@ -348,6 +422,37 @@ mod tests {
     fn test_normalize_path_root() {
         assert_eq!(InMemoryFSIndex::normalize_path("/"), "/");
         assert_eq!(InMemoryFSIndex::canonical_key("/"), "/");
+        assert_eq!(InMemoryFSIndex::normalize_path(""), "");
+    }
+
+    #[test]
+    fn test_normalize_path_drive_letter_native() {
+        // Windows paths keep native backslashes.
+        assert_eq!(InMemoryFSIndex::normalize_path("C:"), "C:\\");
+        assert_eq!(InMemoryFSIndex::normalize_path("C:\\"), "C:\\");
+        assert_eq!(InMemoryFSIndex::normalize_path("C:\\Dev"), "C:\\Dev");
+        assert_eq!(InMemoryFSIndex::normalize_path("C:\\Dev\\"), "C:\\Dev");
+        assert_eq!(InMemoryFSIndex::canonical_key("C:\\Dev\\"), "C:\\Dev");
+    }
+
+    #[test]
+    fn test_path_to_components_drive_native() {
+        assert_eq!(
+            InMemoryFSIndex::path_to_components("C:\\"),
+            vec!["C:\\"]
+        );
+        assert_eq!(
+            InMemoryFSIndex::path_to_components("C:\\Dev\\foo"),
+            vec!["C:\\", "Dev", "foo"]
+        );
+    }
+
+    #[test]
+    fn test_path_to_components_unc_native() {
+        assert_eq!(
+            InMemoryFSIndex::path_to_components(r"\\srv\share\dir"),
+            vec![r"\\srv", "share", "dir"]
+        );
     }
 
     #[test]
