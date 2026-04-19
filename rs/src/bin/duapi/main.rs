@@ -10,10 +10,8 @@ use clap::{ColorChoice, Parser};
 use colored::Colorize;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -27,6 +25,7 @@ mod cleanup;
 mod email;
 mod handler;
 mod mcp;
+mod oidc;
 mod query;
 mod shutdown;
 
@@ -46,22 +45,23 @@ static TEST_DB: OnceLock<db::test_support::TempDb> = OnceLock::new();
     about = "Disk usage API server with web UI"
 )]
 struct Args {
-    /// Input SQLite database file path (built by `dudb`)
-    input: PathBuf,
+    /// Input SQLite database file path (built by `dudb`). Falls back to DB_PATH env var.
+    #[arg(env = "DB_PATH")]
+    input: Option<PathBuf>,
     /// UI folder (defaults to STATIC_DIR env var or local public directory)
     #[arg(short, long, value_name = "DIR", env = "STATIC_DIR")]
     static_dir: Option<String>,
     /// Port number (defaults to PORT env var or 8080)
     #[arg(short, long, env = "PORT")]
     port: Option<u16>,
-    /// Enable HTTPS with certificate file path
-    #[arg(long, value_name = "FILE", env = "TLS_CERT")]
+    /// Enable HTTPS with certificate file path (falls back to TLS_CERT env var)
+    #[arg(long, value_name = "FILE")]
     tls_cert: Option<PathBuf>,
-    /// Private key file path (required if tls-cert is set)
-    #[arg(long, value_name = "FILE", env = "TLS_KEY")]
+    /// Private key file path (falls back to TLS_KEY env var; required if tls-cert is set)
+    #[arg(long, value_name = "FILE")]
     tls_key: Option<PathBuf>,
-    /// CORS allowed origin (defaults to CORS_ORIGIN env var or same-origin)
-    #[arg(long, value_name = "URL", env = "CORS_ORIGIN")]
+    /// CORS allowed origin (falls back to CORS_ORIGIN env var)
+    #[arg(long, value_name = "URL")]
     cors_origin: Option<String>,
 }
 
@@ -81,7 +81,16 @@ async fn main() -> Result<()> {
     }
 
     let args = Args::parse();
-    let db_path = args.input.clone();
+    let db_path = match args.input.clone() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "{}",
+                "FATAL: database path required. Pass as argument or set DB_PATH env var.".red()
+            );
+            std::process::exit(1);
+        }
+    };
     let static_dir: String = args
         .static_dir
         .or_else(|| std::env::var("STATIC_DIR").ok())
@@ -111,6 +120,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Err(e) = oidc::init().await {
+        eprintln!("{}", format!("FATAL: OIDC init failed: {e:#}").red());
+        std::process::exit(1);
+    }
+    println!(
+        "Auth mode: password{}",
+        if oidc::is_enabled() { " + oidc" } else { "" }
+    );
+
     println!("Opening database: {}", db_path.display());
     let pool = db::open_pool(&db_path).with_context(|| {
         format!(
@@ -131,7 +149,18 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let cors = if let Some(ref origin) = args.cors_origin {
+    let cors_origin = args
+        .cors_origin
+        .or_else(|| std::env::var("CORS_ORIGIN").ok())
+        .filter(|s| !s.trim().is_empty());
+    let tls_cert = args
+        .tls_cert
+        .or_else(|| env_path_nonempty("TLS_CERT"));
+    let tls_key = args
+        .tls_key
+        .or_else(|| env_path_nonempty("TLS_KEY"));
+
+    let cors = if let Some(ref origin) = cors_origin {
         let header = match parse_cors_origin(origin) {
             Ok(h) => h,
             Err(e) => {
@@ -152,6 +181,9 @@ async fn main() -> Result<()> {
     let api = Router::new()
         .route("/health", get(health_handler))
         .route("/login", post(login_handler))
+        .route("/auth/mode", get(oidc::mode_handler))
+        .route("/auth/login", get(oidc::login_handler))
+        .route("/auth/callback", get(oidc::callback_handler))
         .route("/users", get(users_handler))
         .route("/folders", get(get_folders_handler))
         .route("/files", get(get_files_handler))
@@ -166,26 +198,6 @@ async fn main() -> Result<()> {
     let body_limit_bytes = env_u64("MAX_BODY_BYTES", 64 * 1024) as usize;
     tracing::info!(timeout_secs, body_limit_bytes, "request limits configured");
 
-    let rate_per_min = env_u64("RATE_LIMIT_PER_MIN", 300);
-    let per_sec = (rate_per_min / 60).max(1);
-    let burst = (rate_per_min / 6).max(5) as u32; // ~10s burst window
-    let governor_conf = match GovernorConfigBuilder::default()
-        .per_second(per_sec)
-        .burst_size(burst)
-        .finish()
-    {
-        Some(c) => Arc::new(c),
-        None => {
-            eprintln!(
-                "{}",
-                format!("FATAL: invalid rate limit (per_sec={per_sec}, burst={burst})").red()
-            );
-            std::process::exit(1);
-        }
-    };
-    tracing::info!(per_sec, burst, "rate limiter configured");
-    let governor_layer = GovernorLayer { config: governor_conf };
-
     let app = Router::new()
         .nest("/api", api)
         .fallback_service(frontend)
@@ -194,12 +206,11 @@ async fn main() -> Result<()> {
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(timeout_secs),
         ))
-        .layer(RequestBodyLimitLayer::new(body_limit_bytes))
-        .layer(governor_layer);
+        .layer(RequestBodyLimitLayer::new(body_limit_bytes));
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
-    match (args.tls_cert, args.tls_key) {
+    match (tls_cert, tls_key) {
         (Some(cert_path), Some(key_path)) => {
             if !cert_path.exists() {
                 eprintln!(
@@ -273,6 +284,14 @@ fn parse_cors_origin(s: &str) -> Result<axum::http::HeaderValue, anyhow::Error> 
     trimmed
         .parse::<axum::http::HeaderValue>()
         .with_context(|| format!("invalid CORS_ORIGIN value: {trimmed:?}"))
+}
+
+fn env_path_nonempty(key: &str) -> Option<PathBuf> {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {

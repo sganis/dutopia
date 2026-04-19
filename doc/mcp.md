@@ -18,8 +18,8 @@ Folding into `duapi` means:
 - One image, one cert, one JWT secret, one Route.
 - `Claims` extractor at `handler.rs:179-188` enforces the same admin/self
   rules on MCP calls as on REST calls.
-- `RATE_LIMIT_PER_MIN`, `MAX_BODY_BYTES`, `REQUEST_TIMEOUT_SECS` apply to
-  MCP traffic without duplicate knobs.
+- `MAX_BODY_BYTES` and `REQUEST_TIMEOUT_SECS` apply to MCP traffic without
+  duplicate knobs.
 
 ## Transport
 
@@ -204,8 +204,5 @@ extractor model).
 
 ## Open questions
 
-1. Rate-limit MCP tool calls separately from REST, or share
-   `RATE_LIMIT_PER_MIN`? Currently shared; revisit if one class starves
-   the other.
-2. When `deltas.md` lands, does `duapi` open multiple snapshot DBs in one
+1. When `deltas.md` lands, does `duapi` open multiple snapshot DBs in one
    process, or proxy to sibling read-only DBs via a `--history-dir` flag?

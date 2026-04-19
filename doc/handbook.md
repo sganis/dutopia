@@ -182,7 +182,6 @@ Middleware stack:
 - CORS (`CORS_ORIGIN`, else permissive methods only).
 - Timeout (`REQUEST_TIMEOUT_SECS`, default 30).
 - Body limit (`MAX_BODY_BYTES`, default 65 536).
-- Rate limit (`tower_governor`, `RATE_LIMIT_PER_MIN`, default 300).
 - Graceful shutdown on SIGTERM/SIGINT.
 
 All DB work runs inside `tokio::task::spawn_blocking` since `rusqlite` is
@@ -390,7 +389,6 @@ All `duapi` config is flag-or-env; CLI flags win.
 | `TLS_CERT`, `TLS_KEY`| (none)          | Enable HTTPS |
 | `REQUEST_TIMEOUT_SECS` | 30            | Per-request timeout |
 | `MAX_BODY_BYTES`     | 65536           | Request body size cap |
-| `RATE_LIMIT_PER_MIN` | 300             | Governor rate (per IP) |
 | `MAX_PAGE_SIZE`      | 2000            | Cap on `/folders` and `/files` results |
 | `FAKE_USER`          | `%USERNAME%`    | Windows dev-auth username |
 | `PAM_SERVICE`        | `login`         | (reserved, Linux) |

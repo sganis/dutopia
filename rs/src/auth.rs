@@ -264,7 +264,15 @@ pub mod platform {
             .or_else(|| env::var("USERNAME").ok().filter(|s| !s.trim().is_empty()))
             .unwrap_or_else(|| "admin".to_string());
         let expected_pass = env::var("FAKE_PASSWORD").unwrap_or_else(|_| "admin".to_string());
-        username == expected_user && password == expected_pass
+        let ok = username == expected_user && password == expected_pass;
+        if !ok {
+            tracing::warn!(
+                supplied_user = %username,
+                expected_user = %expected_user,
+                "windows fake auth: mismatch (set FAKE_USER/FAKE_PASSWORD to override)"
+            );
+        }
+        ok
     }
 }
 

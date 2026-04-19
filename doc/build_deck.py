@@ -388,7 +388,6 @@ add_bullets(s, Inches(7.0), Inches(3.1), Inches(6), Inches(3.6), [
     ("CORS", " CORS_ORIGIN if set"),
     ("Timeout", " REQUEST_TIMEOUT_SECS (30)"),
     ("Body limit", " MAX_BODY_BYTES (64 KB)"),
-    ("Rate limit", " RATE_LIMIT_PER_MIN (300) via tower_governor"),
     ("Shutdown", " graceful on SIGTERM / SIGINT"),
     ("DB work", " tokio::task::spawn_blocking"),
 ], size=14)
@@ -555,7 +554,6 @@ cfg = [
     ("TLS_CERT / TLS_KEY",  "(none)",     "enable HTTPS"),
     ("REQUEST_TIMEOUT_SECS","30",         "per-request timeout"),
     ("MAX_BODY_BYTES",      "65536",      "request body cap"),
-    ("RATE_LIMIT_PER_MIN",  "300",        "governor, per IP"),
     ("MAX_PAGE_SIZE",       "2000",       "cap on /folders and /files"),
     ("FAKE_USER",           "%USERNAME%", "Windows dev-auth user"),
 ]

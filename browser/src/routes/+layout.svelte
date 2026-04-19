@@ -1,11 +1,37 @@
 <!-- browser/src/routes/+layout.svelte -->
 <script>
   import "../app.css";
+  import { onMount } from 'svelte';
   import Login from '../lib/Login.svelte';
   import { State } from '../ts/store.svelte';
   import { clearAll } from '../ts/cache';
 
   let { children } = $props()
+
+  function parseJwt(token) {
+    try {
+      const payload = token.split('.')[1] || '';
+      let b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+      const pad = b64.length % 4; if (pad) b64 += '='.repeat(4 - pad);
+      return JSON.parse(atob(b64));
+    } catch { return {}; }
+  }
+
+  onMount(() => {
+    if (typeof window === 'undefined') return;
+    const hash = window.location.hash || '';
+    const m = hash.match(/(?:^#|&)token=([^&]+)/);
+    if (!m) return;
+    const token = decodeURIComponent(m[1]);
+    const claims = parseJwt(token);
+    State.username = claims?.sub || '';
+    State.isAdmin = !!claims?.is_admin;
+    State.token = token;
+    State.expiresAt = claims?.exp ? claims.exp * 1000 : null;
+    try { localStorage.setItem('state', JSON.stringify(State)); } catch {}
+    const clean = window.location.pathname + window.location.search;
+    window.history.replaceState(null, '', clean);
+  });
   // In the desktop build there is no auth — always render the app.
   let authed = $derived(
       __DESKTOP__ || (

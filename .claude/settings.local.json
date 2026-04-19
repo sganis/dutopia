@@ -38,7 +38,8 @@
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi cleanup:: email::\")",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi cleanup::\")",
       "Read(//tmp/**)",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --lib analytic\")"
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --lib analytic\")",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin duapi --tests\")"
     ]
   }
 }

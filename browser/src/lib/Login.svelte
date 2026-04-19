@@ -1,5 +1,6 @@
 <!-- browser/src/lib/Login.svelte -->
 <script>
+    import { onMount } from 'svelte';
     import { State, API_URL } from '../ts/store.svelte';
     import { fade } from 'svelte/transition';
     import { getOptimalColors } from '../ts/util';
@@ -8,7 +9,26 @@
     let password = $state();
     let working = $state();
     let error = $state('');
+    let mode = $state('password'); // 'password' | 'oidc'
+    let oidcLoginUrl = $state('/api/auth/login');
     let url = `${API_URL}/login`;
+
+    onMount(async () => {
+        try {
+            const r = await fetch(`${API_URL}/auth/mode`);
+            if (r.ok) {
+                const j = await r.json();
+                if (j?.mode === 'oidc') {
+                    mode = 'oidc';
+                    if (j.login_url) oidcLoginUrl = j.login_url;
+                }
+            }
+        } catch {}
+    });
+
+    function onOidcLogin() {
+        window.location.href = oidcLoginUrl;
+    }
 
     // minimal base64url → JSON decoder (no signature verification)
     function parseJwt(token) {
@@ -84,6 +104,11 @@
         <div class="flex flex-col gap-2 p-6 border w-1/2 min-w-80
             items-center justify-center
             border-gray-500 bg-gray-800 rounded-lg shadow-lg ">
+            {#if mode === 'oidc'}
+                <button class="btn w-full" type="button" onclick={onOidcLogin}>
+                    Sign in with Keycloak
+                </button>
+            {:else}
             <form class="space-y-4 w-full" onsubmit={onSubmit}>
                 <div>
                     <label class="block text-sm font-medium" for="username">Username</label>
@@ -123,6 +148,7 @@
                     </button>
                 </div>
             </form>
+            {/if}
         </div>
     </div>
     {#if error}

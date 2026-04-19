@@ -32,11 +32,13 @@ pub async fn health_handler() -> impl IntoResponse {
 /// POST /api/login
 pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
     if payload.username.is_empty() || payload.password.is_empty() {
+        tracing::warn!("login rejected: missing credentials");
         return Err(AuthError::MissingCredentials);
     }
 
     let verified = dutopia::auth::verify_credentials(&payload.username, &payload.password);
     if !verified.authenticated {
+        tracing::warn!(user = %payload.username, "login rejected: wrong credentials");
         return Err(AuthError::WrongCredentials);
     }
 
