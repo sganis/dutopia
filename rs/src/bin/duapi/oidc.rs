@@ -132,7 +132,7 @@ pub fn is_enabled() -> bool {
 /// Generate PKCE verifier + challenge pair.
 pub fn new_pkce() -> (String, String) {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     (verifier, challenge)
@@ -140,7 +140,7 @@ pub fn new_pkce() -> (String, String) {
 
 pub fn new_state() -> String {
     let mut bytes = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
