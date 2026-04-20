@@ -43,7 +43,10 @@
       "Bash(npm install *)",
       "Bash(npm audit *)",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p rand 2>nul\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p glib 2>nul\")"
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p glib 2>nul\")",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git rm *)"
     ]
   }
 }
