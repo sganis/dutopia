@@ -46,7 +46,8 @@
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p glib 2>nul\")",
       "Bash(git checkout *)",
       "Bash(git add *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(git push *)"
     ]
   }
 }

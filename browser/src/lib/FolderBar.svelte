@@ -164,7 +164,7 @@
       <p class="text-sm text-right">
         {bottomValueFolder(folder)}
         • Updated {humanTime(folder.modified)}
-        {#if humanTime(folder.accessed) > humanTime(folder.modified)}
+        {#if folder.accessed > folder.modified}
           • Last file read {humanTime(folder.accessed)}
         {/if}
       </p>

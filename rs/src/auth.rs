@@ -140,20 +140,28 @@ pub struct VerifyResult {
 
 /// Verify credentials with an optional test-mode bypass.
 ///
-/// If the `ADMIN_PASSWORD` env var is set to a non-empty value and the
-/// supplied password matches it, authentication succeeds for any username
-/// *and* the returned result carries `admin_override = true`. Intended
-/// strictly for local development and CI — do NOT set `ADMIN_PASSWORD` in
-/// production.
+/// In debug builds and in test harnesses, if the `ADMIN_PASSWORD` env var is
+/// set to a non-empty value and the supplied password matches it,
+/// authentication succeeds for any username *and* the returned result carries
+/// `admin_override = true`. The bypass is compiled out entirely in release
+/// builds (gated on `cfg(any(debug_assertions, test))`) so a leaked env var
+/// on a production deployment cannot grant admin.
 pub fn verify_credentials(username: &str, password: &str) -> VerifyResult {
-    if let Ok(expected) = std::env::var("ADMIN_PASSWORD") {
-        if !expected.is_empty() && password == expected {
-            tracing::warn!(user = %username, "verify_credentials: ADMIN_PASSWORD override matched");
-            return VerifyResult {
-                authenticated: true,
-                admin_override: true,
-            };
+    #[cfg(any(debug_assertions, test))]
+    {
+        if let Ok(expected) = std::env::var("ADMIN_PASSWORD") {
+            if !expected.is_empty() && password == expected {
+                tracing::warn!(user = %username, "verify_credentials: ADMIN_PASSWORD override matched");
+                return VerifyResult {
+                    authenticated: true,
+                    admin_override: true,
+                };
+            }
         }
+    }
+    #[cfg(not(any(debug_assertions, test)))]
+    {
+        let _ = username; // kept for symmetry with debug path
     }
     VerifyResult {
         authenticated: platform::verify_user(username, password),

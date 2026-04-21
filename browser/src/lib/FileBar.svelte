@@ -75,7 +75,7 @@
         </div>
         <div class="text-nowrap">
           Updated {humanTime(file.modified)}
-          {#if humanTime(file.accessed) > humanTime(file.modified)}
+          {#if file.accessed > file.modified}
             • Read {humanTime(file.accessed)}
           {/if}
         </div>

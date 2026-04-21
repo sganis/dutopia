@@ -212,12 +212,12 @@ pub mod test_support {
         TempDb { path }
     }
 
-    fn uniq() -> u128 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+    fn uniq() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Process-wide counter guarantees uniqueness across parallel test
+        // threads; wall-clock nanoseconds alone can collide on fast systems.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
     }
 
     fn populate(path: &Path) {

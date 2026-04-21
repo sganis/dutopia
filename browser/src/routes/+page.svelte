@@ -1,6 +1,6 @@
 <!-- browser/src/routes/+page.svelte -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS, escapeHtml } from "../ts/util";
   import { api } from "$api";
@@ -495,7 +495,9 @@
   }
 
   function onUserChanged() {
-    selectedUserColor = userColors.get(selectedUser) ?? "#000000";
+    // "All Users" stores an empty string in userColors on purpose; ?? doesn't
+    // treat "" as nullish, so use || to fall through to a valid hex.
+    selectedUserColor = userColors.get(selectedUser) || "#353599";
     refresh();
   }
   //#endregion
@@ -655,6 +657,13 @@
     fullPath = path;
     path = truncatePathFromStart(path);
     refresh();
+  });
+
+  onDestroy(() => {
+    if (toastTimer !== null) {
+      clearTimeout(toastTimer);
+      toastTimer = null;
+    }
   });
 </script>
 
