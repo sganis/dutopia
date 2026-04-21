@@ -47,7 +47,16 @@
       "Bash(git checkout *)",
       "Bash(git add *)",
       "Bash(git rm *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(curl -sI http://localhost:9000/_app/immutable/entry/start.DmRM_Haa.js)",
+      "Bash(curl -sI http://localhost:9000/_app/version.json)",
+      "Bash(curl -s http://localhost:9000/_app/version.json)",
+      "Bash(curl -s http://localhost:9000/api/auth/mode)",
+      "Bash(curl -s http://localhost:9000/api/nonexistent)",
+      "Bash(curl -sv http://localhost:9000/api/health)",
+      "Bash(curl -s -X POST \"http://localhost:8080/realms/master/protocol/openid-connect/token\" -H \"Content-Type: application/x-www-form-urlencoded\" -d \"username=admin&password=admin&grant_type=password&client_id=admin-cli\")",
+      "Bash(python3 -c \"import sys, json; [print\\(f\\\\\"{c['clientId']}  redirects={c.get\\('redirectUris'\\)}  publicClient={c.get\\('publicClient'\\)}\\\\\"\\) for c in json.load\\(sys.stdin\\)]\")",
+      "Bash(python3 -c \"import sys, json; [print\\(u.get\\('username'\\)\\) for u in json.load\\(sys.stdin\\)]\")"
     ]
   }
 }
