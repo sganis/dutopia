@@ -344,6 +344,89 @@ Notes and constraints:
   proxies requests back to the IdP, so no refresh flow exists. When the
   24 h internal JWT expires the user must click **Sign in** again.
 
+Keycloak setup walkthrough:
+
+The steps below configure a fresh Keycloak instance end-to-end. Replace
+`<duapi-origin>` with the URL `duapi` is served on
+(e.g. `https://dutopia.example.com`).
+
+1. **Start Keycloak (dev).**
+
+   ```bash
+   docker run -p 8080:8080 \
+     -e KEYCLOAK_ADMIN=admin \
+     -e KEYCLOAK_ADMIN_PASSWORD=admin \
+     quay.io/keycloak/keycloak:latest start-dev
+   ```
+
+   Admin console: `http://localhost:8080`, log in as `admin` / `admin`.
+
+2. **Create a realm.** Top-left realm dropdown -> **Create realm** ->
+   name `dutopia` -> **Create**. Confirm the realm selector now shows
+   `dutopia` (not `master`) for all subsequent steps.
+
+3. **Create the client.** Left sidebar -> **Clients** -> **Create client**.
+
+   - General: *Client type* `OpenID Connect`, *Client ID* `duapi`. Next.
+   - Capability: *Client authentication* ON (required to get a secret),
+     *Authorization* OFF, *Standard flow* ON, *Direct access grants* OFF.
+     Next.
+   - Login: *Valid Redirect URIs* `<duapi-origin>/api/auth/callback`,
+     *Web origins* `<duapi-origin>`. Save.
+
+4. **Require PKCE.** Open the client -> **Advanced** tab ->
+   *Proof Key for Code Exchange Code Challenge Method* -> `S256` -> Save.
+
+5. **Copy the client secret.** Client -> **Credentials** tab ->
+   copy *Client secret*. Use **Regenerate** to rotate. This is the value
+   for `OIDC_CLIENT_SECRET`.
+
+6. **(Optional) Create a test user.** **Users** -> **Add user** -> set
+   username + email -> **Create** -> **Credentials** tab -> **Set
+   password**, turn off *Temporary*.
+
+7. **Configure `duapi`.**
+
+   ```bash
+   export OIDC_ISSUER=http://localhost:8080/realms/dutopia
+   export OIDC_CLIENT_ID=duapi
+   export OIDC_CLIENT_SECRET=<paste from step 5>
+   export OIDC_REDIRECT_URI=<duapi-origin>/api/auth/callback
+   # Optional:
+   # export OIDC_SCOPES="openid profile email"
+   # export OIDC_USERNAME_CLAIM=preferred_username
+   # export OIDC_POST_LOGIN_REDIRECT=/
+   ```
+
+   On startup, `duapi` logs `Auth mode: password + oidc` and the Login
+   screen renders a **Sign in with Keycloak** button.
+
+8. **Smoke test the token endpoint** (optional, validates the client
+   credentials independent of `duapi`):
+
+   ```bash
+   curl -X POST \
+     $OIDC_ISSUER/protocol/openid-connect/token \
+     -d "client_id=$OIDC_CLIENT_ID" \
+     -d "client_secret=$OIDC_CLIENT_SECRET" \
+     -d "grant_type=password" \
+     -d "username=<testuser>" \
+     -d "password=<testpass>"
+   ```
+
+   A JSON body containing `access_token` means the realm, client, and
+   secret are wired correctly.
+
+Useful realm endpoints (for realm `dutopia` on `http://localhost:8080`):
+
+```
+Issuer:       http://localhost:8080/realms/dutopia
+Discovery:    http://localhost:8080/realms/dutopia/.well-known/openid-configuration
+Authorize:    http://localhost:8080/realms/dutopia/protocol/openid-connect/auth
+Token:        http://localhost:8080/realms/dutopia/protocol/openid-connect/token
+JWKS:         http://localhost:8080/realms/dutopia/protocol/openid-connect/certs
+```
+
 Keycloak client checklist:
 
 | Setting                   | Value |
@@ -351,7 +434,8 @@ Keycloak client checklist:
 | Client type               | OpenID Connect, confidential |
 | Standard Flow             | enabled (Authorization Code) |
 | Direct Access Grants      | disabled |
-| Valid Redirect URIs       | `<your-duapi-origin>/api/auth/callback` |
+| Valid Redirect URIs       | `<duapi-origin>/api/auth/callback` |
+| Web Origins               | `<duapi-origin>` |
 | PKCE Code Challenge Method| `S256` (required) |
 | Client Authentication     | Client secret |
 
