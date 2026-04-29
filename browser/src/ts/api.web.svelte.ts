@@ -59,8 +59,12 @@ class Api {
       const response = await fetch(url, options);
       const data: T = await response.json();
       if (!response.ok) {
-        // do this to redirect to login
-        State.token = null
+        // 401/403 → session is gone. Fully clear it (clears localStorage and
+        // the IndexedDB cache) so the next user doesn't see stale data and a
+        // reload doesn't silently log us back in with the dead token.
+        if (response.status === 401 || response.status === 403) {
+          State.logout();
+        }
         this.error = (data as any).detail || "Unknown API error";
         return null;
       }

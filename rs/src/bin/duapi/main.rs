@@ -1,9 +1,10 @@
 // rs/src/bin/duapi/main.rs
 use anyhow::{Context, Result};
 use axum::{
-    http::Method,
+    http::{Method, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{ColorChoice, Parser};
@@ -189,7 +190,8 @@ async fn main() -> Result<()> {
         .route("/files", get(get_files_handler))
         .route("/mcp", post(mcp::handler))
         .route("/cleanup/script", post(cleanup::script_handler))
-        .route("/cleanup/notify", post(cleanup::notify_handler));
+        .route("/cleanup/notify", post(cleanup::notify_handler))
+        .fallback(api_not_found);
 
     let frontend = ServeDir::new(&static_dir)
         .not_found_service(ServeFile::new(format!("{}/index.html", static_dir)));
@@ -203,7 +205,7 @@ async fn main() -> Result<()> {
         .fallback_service(frontend)
         .layer(cors)
         .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
+            StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(timeout_secs),
         ))
         .layer(RequestBodyLimitLayer::new(body_limit_bytes));
@@ -270,6 +272,15 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// JSON 404 for unmatched `/api/*` paths so typos/wrong methods don't leak into
+/// the SPA fallback and return `index.html`.
+async fn api_not_found() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "not found" })),
+    )
 }
 
 /// Parse a CORS origin string into the `HeaderValue` that `tower_http`'s `CorsLayer` requires.

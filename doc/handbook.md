@@ -171,11 +171,13 @@ duapi <input.db> [OPTIONS]
 Startup:
 
 1. Requires `JWT_SECRET` env var; exits if missing.
-2. Opens SQLite pool (size = max(num_cpus, 4)) with `query_only=ON`,
+2. Runs OIDC discovery if `OIDC_ISSUER` is set (see §3.1); a missing or
+   unreachable issuer is fatal.
+3. Opens SQLite pool (size = max(num_cpus, 4)) with `query_only=ON`,
    30 GB mmap hint, 64 MB cache per connection.
-3. Validates `metadata.schema_version == "2"`; bails with "rebuild with
+4. Validates `metadata.schema_version == "2"`; bails with "rebuild with
    newer dudb" otherwise.
-4. Caches user list into `OnceLock<Vec<String>>`.
+5. Caches user list into `OnceLock<Vec<String>>`.
 
 Middleware stack:
 
@@ -265,6 +267,177 @@ Platform auth:
 Admin: set in the JWT if the username is in `ADMIN_GROUP` (comma-separated,
 case-insensitive) *or* if an `ADMIN_PASSWORD` override matched. The admin
 override is development/CI only — never set `ADMIN_PASSWORD` in production.
+
+### 3.1 Keycloak / OIDC SSO (optional)
+
+When `OIDC_ISSUER` is set, `duapi` enables an OpenID Connect Authorization
+Code flow with PKCE alongside (not instead of) the password endpoint. Any
+OIDC-compliant IdP works — Keycloak is the reference deployment.
+
+Activation is detected at boot: `duapi` fetches
+`<OIDC_ISSUER>/.well-known/openid-configuration`, reads the `authorization`,
+`token`, and `jwks_uri` endpoints, and prints `Auth mode: password + oidc`.
+Discovery failure is fatal.
+
+Three endpoints are added under `/api/auth`:
+
+#### `GET /api/auth/mode`
+
+Advertises which login the SPA should render. Unauthenticated.
+
+```json
+{ "mode": "oidc",     "login_url": "/api/auth/login" }   // OIDC enabled
+{ "mode": "password", "login_url": null }                // OIDC disabled
+```
+
+The SPA (`browser/src/lib/Login.svelte`) calls this on mount; if `mode` is
+`oidc` it renders a single **Sign in with Keycloak** button that navigates
+to `login_url`, otherwise it renders the username/password form.
+
+#### `GET /api/auth/login`
+
+Starts the code flow:
+
+1. Generates a random `state` (24 bytes, base64url) and PKCE S256 pair
+   (32-byte verifier, SHA-256 challenge).
+2. Signs a short-lived JWT containing `{ state, pkce_verifier }` with
+   `JWT_SECRET` and sets it as the `duapi_oidc_state` cookie
+   (`HttpOnly; SameSite=Lax; Secure; Max-Age=600`).
+3. 302-redirects to the IdP's authorize endpoint with `response_type=code`,
+   `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`,
+   `code_challenge_method=S256`.
+
+#### `GET /api/auth/callback`
+
+The IdP redirects the browser here with `?code=…&state=…`:
+
+1. Decodes and verifies the `duapi_oidc_state` cookie JWT and checks
+   `state` matches; mismatches return `400`.
+2. Exchanges the `code` at the token endpoint (form post) using the stored
+   `pkce_verifier`, `client_id`, `client_secret`, and `redirect_uri`.
+3. Verifies the returned `id_token`: fetches the JWKS (cached for 1 h),
+   enforces issuer, audience (`client_id`), expiration, and algorithm
+   (`RS256`/`RS384`/`RS512` only). `kty` must be `RSA`.
+4. Extracts `username` from the claim named by `OIDC_USERNAME_CLAIM`
+   (default `preferred_username`, falling back to `sub`).
+5. Mints the **same internal 24 h JWT** used by password login — including
+   the `is_admin` flag derived from `ADMIN_GROUP` — then clears the state
+   cookie and 302-redirects to `<OIDC_POST_LOGIN_REDIRECT>#token=<jwt>`.
+
+The SPA reads the token from the URL fragment, stores it in
+`localStorage`, and uses it as a bearer on all subsequent `/api/*` calls —
+downstream handlers do not distinguish password-issued from OIDC-issued
+tokens.
+
+Notes and constraints:
+
+- `ADMIN_PASSWORD` only affects the password endpoint — it never applies to
+  OIDC. Admin rights for OIDC users come from `ADMIN_GROUP` only.
+- `OIDC_REDIRECT_URI` must match the Keycloak client's registered redirect
+  URI exactly (scheme, host, port, path), e.g.
+  `https://dutopia.example.com/api/auth/callback`.
+- Because the state cookie is marked `Secure`, the OIDC flow requires
+  HTTPS in production. For local dev, terminate TLS at a reverse proxy or
+  accept that the cookie will not round-trip over plain HTTP.
+- JWKS is cached for 1 h; missing `kid`s trigger an immediate refetch.
+- The IdP's access token and refresh token are discarded — `duapi` never
+  proxies requests back to the IdP, so no refresh flow exists. When the
+  24 h internal JWT expires the user must click **Sign in** again.
+
+Keycloak setup walkthrough:
+
+The steps below configure a fresh Keycloak instance end-to-end. Replace
+`<duapi-origin>` with the URL `duapi` is served on
+(e.g. `https://dutopia.example.com`).
+
+1. **Start Keycloak (dev).**
+
+   ```bash
+   docker run -p 8080:8080 \
+     -e KEYCLOAK_ADMIN=admin \
+     -e KEYCLOAK_ADMIN_PASSWORD=admin \
+     quay.io/keycloak/keycloak:latest start-dev
+   ```
+
+   Admin console: `http://localhost:8080`, log in as `admin` / `admin`.
+
+2. **Create a realm.** Top-left realm dropdown -> **Create realm** ->
+   name `dutopia` -> **Create**. Confirm the realm selector now shows
+   `dutopia` (not `master`) for all subsequent steps.
+
+3. **Create the client.** Left sidebar -> **Clients** -> **Create client**.
+
+   - General: *Client type* `OpenID Connect`, *Client ID* `duapi`. Next.
+   - Capability: *Client authentication* ON (required to get a secret),
+     *Authorization* OFF, *Standard flow* ON, *Direct access grants* OFF.
+     Next.
+   - Login: *Valid Redirect URIs* `<duapi-origin>/api/auth/callback`,
+     *Web origins* `<duapi-origin>`. Save.
+
+4. **Require PKCE.** Open the client -> **Advanced** tab ->
+   *Proof Key for Code Exchange Code Challenge Method* -> `S256` -> Save.
+
+5. **Copy the client secret.** Client -> **Credentials** tab ->
+   copy *Client secret*. Use **Regenerate** to rotate. This is the value
+   for `OIDC_CLIENT_SECRET`.
+
+6. **(Optional) Create a test user.** **Users** -> **Add user** -> set
+   username + email -> **Create** -> **Credentials** tab -> **Set
+   password**, turn off *Temporary*.
+
+7. **Configure `duapi`.**
+
+   ```bash
+   export OIDC_ISSUER=http://localhost:8080/realms/dutopia
+   export OIDC_CLIENT_ID=duapi
+   export OIDC_CLIENT_SECRET=<paste from step 5>
+   export OIDC_REDIRECT_URI=<duapi-origin>/api/auth/callback
+   # Optional:
+   # export OIDC_SCOPES="openid profile email"
+   # export OIDC_USERNAME_CLAIM=preferred_username
+   # export OIDC_POST_LOGIN_REDIRECT=/
+   ```
+
+   On startup, `duapi` logs `Auth mode: password + oidc` and the Login
+   screen renders a **Sign in with Keycloak** button.
+
+8. **Smoke test the token endpoint** (optional, validates the client
+   credentials independent of `duapi`):
+
+   ```bash
+   curl -X POST \
+     $OIDC_ISSUER/protocol/openid-connect/token \
+     -d "client_id=$OIDC_CLIENT_ID" \
+     -d "client_secret=$OIDC_CLIENT_SECRET" \
+     -d "grant_type=password" \
+     -d "username=<testuser>" \
+     -d "password=<testpass>"
+   ```
+
+   A JSON body containing `access_token` means the realm, client, and
+   secret are wired correctly.
+
+Useful realm endpoints (for realm `dutopia` on `http://localhost:8080`):
+
+```
+Issuer:       http://localhost:8080/realms/dutopia
+Discovery:    http://localhost:8080/realms/dutopia/.well-known/openid-configuration
+Authorize:    http://localhost:8080/realms/dutopia/protocol/openid-connect/auth
+Token:        http://localhost:8080/realms/dutopia/protocol/openid-connect/token
+JWKS:         http://localhost:8080/realms/dutopia/protocol/openid-connect/certs
+```
+
+Keycloak client checklist:
+
+| Setting                   | Value |
+|---------------------------|-------|
+| Client type               | OpenID Connect, confidential |
+| Standard Flow             | enabled (Authorization Code) |
+| Direct Access Grants      | disabled |
+| Valid Redirect URIs       | `<duapi-origin>/api/auth/callback` |
+| Web Origins               | `<duapi-origin>` |
+| PKCE Code Challenge Method| `S256` (required) |
+| Client Authentication     | Client secret |
 
 ### `GET /api/users`
 
@@ -392,6 +565,13 @@ All `duapi` config is flag-or-env; CLI flags win.
 | `MAX_PAGE_SIZE`      | 2000            | Cap on `/folders` and `/files` results |
 | `FAKE_USER`          | `%USERNAME%`    | Windows dev-auth username |
 | `PAM_SERVICE`        | `login`         | (reserved, Linux) |
+| `OIDC_ISSUER`        | (unset)         | Base URL of the OIDC IdP (e.g. `https://keycloak.example.com/realms/dutopia`). Setting this turns on the OIDC flow. |
+| `OIDC_CLIENT_ID`     | (required if issuer set) | OIDC client id |
+| `OIDC_CLIENT_SECRET` | (required if issuer set) | OIDC client secret |
+| `OIDC_REDIRECT_URI`  | (required if issuer set) | Must match the client's registered redirect, ending in `/api/auth/callback` |
+| `OIDC_SCOPES`        | `openid profile email` | Space-separated OIDC scopes |
+| `OIDC_USERNAME_CLAIM`| `preferred_username` | id_token claim used as internal username (falls back to `sub`) |
+| `OIDC_POST_LOGIN_REDIRECT` | `/`       | SPA URL to redirect to after successful OIDC login; the internal JWT is appended as `#token=…` |
 
 ---
 

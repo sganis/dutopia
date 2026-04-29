@@ -86,6 +86,8 @@ pub async fn init() -> Result<()> {
         std::env::var("OIDC_USERNAME_CLAIM").unwrap_or_else(|_| "preferred_username".into());
     let post_login_redirect =
         std::env::var("OIDC_POST_LOGIN_REDIRECT").unwrap_or_else(|_| "/".into());
+    validate_post_login_redirect(&post_login_redirect, &redirect_uri)
+        .context("OIDC_POST_LOGIN_REDIRECT rejected")?;
 
     let disc_url = format!("{}/.well-known/openid-configuration", issuer);
     let disc: Discovery = reqwest::Client::new()
@@ -144,7 +146,39 @@ pub fn new_state() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-pub fn authorize_url(state: &str, pkce_challenge: &str) -> Result<String> {
+pub fn new_nonce() -> String {
+    let mut bytes = [0u8; 24];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Reject anything that isn't a same-origin redirect. A misconfigured
+/// `OIDC_POST_LOGIN_REDIRECT` would otherwise leak the freshly minted user JWT
+/// (which rides in the URL fragment) to an attacker-controlled origin.
+///
+/// Accepts:
+///   - A path starting with a single `/` (same-origin relative). `//host/...`
+///     is *rejected* because browsers treat it as a scheme-relative URL.
+///   - An absolute URL whose origin matches `redirect_uri`'s origin.
+pub fn validate_post_login_redirect(target: &str, redirect_uri: &str) -> Result<()> {
+    if target.starts_with('/') && !target.starts_with("//") {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(target)
+        .map_err(|e| anyhow!("not a relative path and not a valid URL: {e}"))?;
+    let base = url::Url::parse(redirect_uri)
+        .map_err(|e| anyhow!("OIDC_REDIRECT_URI is not a valid URL: {e}"))?;
+    if parsed.origin() != base.origin() {
+        return Err(anyhow!(
+            "origin {:?} does not match OIDC_REDIRECT_URI origin {:?}",
+            parsed.origin().ascii_serialization(),
+            base.origin().ascii_serialization()
+        ));
+    }
+    Ok(())
+}
+
+pub fn authorize_url(state: &str, pkce_challenge: &str, nonce: &str) -> Result<String> {
     let cfg = config().ok_or_else(|| anyhow!("OIDC not configured"))?;
     let mut u = url::Url::parse(&cfg.authorize_endpoint)?;
     u.query_pairs_mut()
@@ -153,13 +187,19 @@ pub fn authorize_url(state: &str, pkce_challenge: &str) -> Result<String> {
         .append_pair("redirect_uri", &cfg.redirect_uri)
         .append_pair("scope", &cfg.scopes)
         .append_pair("state", state)
+        .append_pair("nonce", nonce)
         .append_pair("code_challenge", pkce_challenge)
         .append_pair("code_challenge_method", "S256");
     Ok(u.into())
 }
 
 /// Exchange an authorization code for an id_token, verify it, map to internal Claims.
-pub async fn exchange_and_verify(code: &str, pkce_verifier: &str, ttl_secs: u64) -> Result<Claims> {
+pub async fn exchange_and_verify(
+    code: &str,
+    pkce_verifier: &str,
+    expected_nonce: &str,
+    ttl_secs: u64,
+) -> Result<Claims> {
     let cfg = config().ok_or_else(|| anyhow!("OIDC not configured"))?;
 
     let params = [
@@ -183,7 +223,7 @@ pub async fn exchange_and_verify(code: &str, pkce_verifier: &str, ttl_secs: u64)
         .await
         .context("parsing token response")?;
 
-    let id_claims = verify_id_token(&tok.id_token, cfg).await?;
+    let id_claims = verify_id_token(&tok.id_token, cfg, expected_nonce).await?;
     map_to_internal(id_claims, cfg, ttl_secs)
 }
 
@@ -231,7 +271,11 @@ struct IdTokenClaims {
     extra: HashMap<String, serde_json::Value>,
 }
 
-async fn verify_id_token(token: &str, cfg: &OidcConfig) -> Result<IdTokenClaims> {
+async fn verify_id_token(
+    token: &str,
+    cfg: &OidcConfig,
+    expected_nonce: &str,
+) -> Result<IdTokenClaims> {
     let header = decode_header(token).context("decode JWT header")?;
     let kid = header.kid.ok_or_else(|| anyhow!("id_token missing kid"))?;
     let alg = header.alg;
@@ -253,6 +297,19 @@ async fn verify_id_token(token: &str, cfg: &OidcConfig) -> Result<IdTokenClaims>
     validation.validate_exp = true;
 
     let data = decode::<IdTokenClaims>(token, &key, &validation).context("id_token verify")?;
+
+    // OIDC Core §3.1.3.7: nonce must match what we sent in the auth request.
+    // Guards against id_token replay even if an attacker captured a valid one.
+    let got_nonce = data
+        .claims
+        .extra
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("id_token missing nonce claim"))?;
+    if got_nonce != expected_nonce {
+        return Err(anyhow!("id_token nonce mismatch"));
+    }
+
     let _ = (jwk.use_, jwk.alg); // suppress unused
     Ok(data.claims)
 }
@@ -307,6 +364,7 @@ const STATE_TTL_SECS: u64 = 10 * 60;
 struct StateCookie {
     state: String,
     pkce_verifier: String,
+    nonce: String,
     exp: usize,
 }
 
@@ -337,8 +395,9 @@ pub async fn login_handler() -> Response {
         return (StatusCode::NOT_FOUND, "OIDC disabled").into_response();
     }
     let state = new_state();
+    let nonce = new_nonce();
     let (verifier, challenge) = new_pkce();
-    let url = match authorize_url(&state, &challenge) {
+    let url = match authorize_url(&state, &challenge, &nonce) {
         Ok(u) => u,
         Err(e) => {
             tracing::error!(err = %e, "authorize_url failed");
@@ -355,6 +414,7 @@ pub async fn login_handler() -> Response {
         &StateCookie {
             state,
             pkce_verifier: verifier,
+            nonce,
             exp,
         },
         &keys().encoding,
@@ -418,7 +478,14 @@ pub async fn callback_handler(headers: HeaderMap, Query(q): Query<CallbackQuery>
     }
 
     const TTL_SECONDS: u64 = 24 * 60 * 60;
-    let claims = match exchange_and_verify(&code, &decoded.pkce_verifier, TTL_SECONDS).await {
+    let claims = match exchange_and_verify(
+        &code,
+        &decoded.pkce_verifier,
+        &decoded.nonce,
+        TTL_SECONDS,
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(err = %e, "OIDC exchange/verify failed");
@@ -477,8 +544,53 @@ mod tests {
     #[test]
     fn authorize_url_errors_when_disabled() {
         // CONFIG not initialized in this unit-test process.
-        let r = authorize_url("s", "c");
+        let r = authorize_url("s", "c", "n");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn validate_post_login_redirect_accepts_relative_same_origin() {
+        assert!(validate_post_login_redirect("/", "https://app.example/cb").is_ok());
+        assert!(validate_post_login_redirect("/foo/bar", "https://app.example/cb").is_ok());
+    }
+
+    #[test]
+    fn validate_post_login_redirect_accepts_absolute_same_origin() {
+        assert!(
+            validate_post_login_redirect("https://app.example/home", "https://app.example/cb")
+                .is_ok()
+        );
+        assert!(validate_post_login_redirect(
+            "https://app.example:443/home",
+            "https://app.example/cb"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_post_login_redirect_rejects_cross_origin() {
+        assert!(
+            validate_post_login_redirect("https://attacker.example/", "https://app.example/cb")
+                .is_err()
+        );
+        assert!(
+            validate_post_login_redirect("http://app.example/", "https://app.example/cb").is_err()
+        );
+    }
+
+    #[test]
+    fn validate_post_login_redirect_rejects_scheme_relative() {
+        // //attacker.example/foo is a scheme-relative URL — browsers treat it
+        // as cross-origin. Make sure we reject it.
+        assert!(
+            validate_post_login_redirect("//attacker.example/foo", "https://app.example/cb")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nonce_is_unique() {
+        assert_ne!(new_nonce(), new_nonce());
     }
 
     #[test]

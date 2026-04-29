@@ -2,6 +2,7 @@
 <script>
     import { onMount } from 'svelte';
     import { State, API_URL } from '../ts/store.svelte';
+    import { clearAll } from '../ts/cache';
     import { fade } from 'svelte/transition';
     import { getOptimalColors } from '../ts/util';
 
@@ -67,6 +68,12 @@
             }
             const claims = parseJwt(token)
             const expires_at = claims?.exp ? claims.exp * 1000 : null;
+
+            // Drop any cached responses from a previous session before the new
+            // user's first fetch: the per-endpoint cache isn't keyed by user,
+            // so without this a fresh login can see the previous user's data
+            // inside the 1-minute TTL window.
+            await clearAll().catch(() => {});
 
             // update app state
             State.username  = claims?.sub || username;

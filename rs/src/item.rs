@@ -63,8 +63,11 @@ pub fn get_items<P: AsRef<std::path::Path>>(
     };
 
     let now = Utc::now();
+    // Must match the AgeCfg defaults used by dusum (young=60, old=600) —
+    // otherwise /api/files?age=2 returns a different set of files than the
+    // aggregated bucket-2 stats shown on /api/folders for the same folder.
     let cutoff_recent = (now - Duration::days(60)).timestamp();
-    let cutoff_old = (now - Duration::days(730)).timestamp();
+    let cutoff_old = (now - Duration::days(600)).timestamp();
 
     let mut out = Vec::new();
     let mut uid_cache: HashMap<u32, String> = HashMap::new();
@@ -149,8 +152,11 @@ pub fn get_items<P: AsRef<std::path::Path>>(
     };
 
     let now = Utc::now();
+    // Must match the AgeCfg defaults used by dusum (young=60, old=600) —
+    // otherwise /api/files?age=2 returns a different set of files than the
+    // aggregated bucket-2 stats shown on /api/folders for the same folder.
     let cutoff_recent = (now - Duration::days(60)).timestamp();
-    let cutoff_old = (now - Duration::days(730)).timestamp();
+    let cutoff_old = (now - Duration::days(600)).timestamp();
 
     let to_unix = |t: SystemTime| -> i64 {
         t.duration_since(SystemTime::UNIX_EPOCH)

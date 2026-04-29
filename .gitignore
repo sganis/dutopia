@@ -1,6 +1,7 @@
 __pycache__/
 target/
 .env*
+!.env.example
 .vscode/
 .DS_Store
 .venv/

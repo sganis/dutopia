@@ -141,8 +141,12 @@ pub async fn get_folders_handler(
             v
         }
         Ok(Err(e)) => {
-            tracing::warn!(path = %path, err = %e, "list_children ERROR /api/folders");
-            Vec::new()
+            tracing::error!(path = %path, err = %e, "500 list_children ERROR /api/folders");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_children error: {e}"),
+            )
+                .into_response();
         }
     };
 
