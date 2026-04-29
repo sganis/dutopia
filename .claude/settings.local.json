@@ -43,7 +43,12 @@
       "Bash(npm install *)",
       "Bash(npm audit *)",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p rand 2>nul\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p glib 2>nul\")"
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p glib 2>nul\")",
+      "Bash(grep -E \"\\\\.\\(rs|ts|svelte\\)$\")",
+      "Bash(head -228 src/bin/duapi/handler.rs)",
+      "Bash(printf '\\\\n#[cfg\\(test\\)]\\\\n#[path = \"handler_tests.rs\"]\\\\nmod tests;\\\\n')",
+      "Bash(mv src/bin/duapi/handler.rs.new src/bin/duapi/handler.rs)",
+      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat clippy --bin duapi --tests -- -D warnings\")"
     ]
   }
 }
