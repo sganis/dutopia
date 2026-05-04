@@ -90,27 +90,62 @@ struct JwksCache {
     fetched_at: Option<Instant>,
 }
 
+/// Strip surrounding whitespace and a single pair of matching quotes. Defensive
+/// against `.env` files written as `OIDC_CLIENT_ID="duapi"` or with stray
+/// trailing whitespace, which Keycloak rejects as "Client not found".
+fn clean_env(raw: &str) -> String {
+    let s = raw.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
 /// Initialize OIDC at boot. Returns Ok(Some(cfg)) if OIDC_ISSUER is set and discovery succeeds,
 /// Ok(None) if OIDC is disabled, Err if misconfigured.
 pub async fn init() -> Result<()> {
     let issuer = match std::env::var("OIDC_ISSUER") {
-        Ok(s) if !s.trim().is_empty() => s.trim().trim_end_matches('/').to_string(),
+        Ok(s) if !s.trim().is_empty() => clean_env(&s).trim_end_matches('/').to_string(),
         _ => {
             let _ = CONFIG.set(None);
             return Ok(());
         }
     };
-    let client_id = std::env::var("OIDC_CLIENT_ID")
-        .context("OIDC_CLIENT_ID required when OIDC_ISSUER is set")?;
-    let client_secret = std::env::var("OIDC_CLIENT_SECRET")
-        .context("OIDC_CLIENT_SECRET required when OIDC_ISSUER is set")?;
-    let redirect_uri = std::env::var("OIDC_REDIRECT_URI")
-        .context("OIDC_REDIRECT_URI required when OIDC_ISSUER is set")?;
-    let scopes = std::env::var("OIDC_SCOPES").unwrap_or_else(|_| "openid profile email".into());
-    let username_claim =
-        std::env::var("OIDC_USERNAME_CLAIM").unwrap_or_else(|_| "preferred_username".into());
-    let post_login_redirect =
-        std::env::var("OIDC_POST_LOGIN_REDIRECT").unwrap_or_else(|_| "/".into());
+    let client_id = clean_env(
+        &std::env::var("OIDC_CLIENT_ID")
+            .context("OIDC_CLIENT_ID required when OIDC_ISSUER is set")?,
+    );
+    let client_secret = clean_env(
+        &std::env::var("OIDC_CLIENT_SECRET")
+            .context("OIDC_CLIENT_SECRET required when OIDC_ISSUER is set")?,
+    );
+    let redirect_uri = clean_env(
+        &std::env::var("OIDC_REDIRECT_URI")
+            .context("OIDC_REDIRECT_URI required when OIDC_ISSUER is set")?,
+    );
+    let scopes = std::env::var("OIDC_SCOPES")
+        .map(|s| clean_env(&s))
+        .unwrap_or_else(|_| "openid profile email".into());
+    let username_claim = std::env::var("OIDC_USERNAME_CLAIM")
+        .map(|s| clean_env(&s))
+        .unwrap_or_else(|_| "preferred_username".into());
+    let post_login_redirect = std::env::var("OIDC_POST_LOGIN_REDIRECT")
+        .map(|s| clean_env(&s))
+        .unwrap_or_else(|_| "/".into());
+    if client_id.is_empty() {
+        return Err(anyhow!("OIDC_CLIENT_ID is empty"));
+    }
+    if client_secret.is_empty() {
+        return Err(anyhow!("OIDC_CLIENT_SECRET is empty"));
+    }
+    if redirect_uri.is_empty() {
+        return Err(anyhow!("OIDC_REDIRECT_URI is empty"));
+    }
     validate_post_login_redirect(&post_login_redirect, &redirect_uri)
         .context("OIDC_POST_LOGIN_REDIRECT rejected")?;
 
@@ -141,7 +176,14 @@ pub async fn init() -> Result<()> {
         jwks_uri: disc.jwks_uri,
         post_login_redirect,
     };
-    tracing::info!(issuer = %cfg.issuer, "OIDC enabled");
+    tracing::info!(
+        issuer = %cfg.issuer,
+        client_id = %cfg.client_id,
+        redirect_uri = %cfg.redirect_uri,
+        authorize_endpoint = %cfg.authorize_endpoint,
+        token_endpoint = %cfg.token_endpoint,
+        "OIDC enabled"
+    );
     let _ = CONFIG.set(Some(cfg));
     let _ = JWKS_CACHE.set(Mutex::new(JwksCache {
         keys: HashMap::new(),
