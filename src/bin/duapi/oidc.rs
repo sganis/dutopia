@@ -189,7 +189,116 @@ pub async fn init() -> Result<()> {
         keys: HashMap::new(),
         fetched_at: None,
     }));
+    dutopia::auth::set_extra_verifier(verify_bearer_boxed);
     Ok(())
+}
+
+fn verify_bearer_boxed(
+    token: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Claims>> + Send>> {
+    Box::pin(verify_bearer(token))
+}
+
+/// Verify a Keycloak/OIDC RS256 access_token presented as a bearer.
+///
+/// Distinct from `verify_id_token`: that one runs on the interactive code
+/// flow's `id_token` and demands `aud=client_id` + matching nonce. This one
+/// runs on every API request and accepts an audience from
+/// `OIDC_API_AUDIENCES` (comma-separated; defaults to `client_id`). The neos
+/// proxy mints `aud=dutopia-mcp` via token-exchange before forwarding.
+pub async fn verify_bearer(token: String) -> Option<Claims> {
+    let cfg = config()?;
+    let header = decode_header(&token).ok()?;
+    let kid = header.kid?;
+    let alg = header.alg;
+    if !matches!(alg, Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512) {
+        return None;
+    }
+    let jwk = get_jwk(&kid, cfg).await.ok()?;
+    if jwk.kty != "RSA" {
+        return None;
+    }
+    let n = jwk.n?;
+    let e = jwk.e?;
+    let key = DecodingKey::from_rsa_components(&n, &e).ok()?;
+
+    let auds = api_audiences(cfg);
+    let aud_refs: Vec<&str> = auds.iter().map(String::as_str).collect();
+    let mut validation = Validation::new(alg);
+    validation.set_issuer(&[&cfg.issuer]);
+    validation.set_audience(&aud_refs);
+    validation.validate_exp = true;
+
+    let data = decode::<IdTokenClaims>(&token, &key, &validation).ok()?;
+    let username = data
+        .claims
+        .extra
+        .get(&cfg.username_claim)
+        .and_then(|v| v.as_str())
+        .or_else(|| data.claims.extra.get("sub").and_then(|v| v.as_str()))?
+        .to_string();
+
+    let is_admin = compute_is_admin(&username, &data.claims.extra);
+
+    let exp = data
+        .claims
+        .extra
+        .get("exp")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    Some(Claims {
+        sub: username,
+        is_admin,
+        exp,
+    })
+}
+
+/// `is_admin` decision for an OIDC-authenticated caller.
+///
+/// `ADMIN_GROUP` is comma-separated and matches case-insensitively against
+/// **either** the username **or** any entry in the token's `groups` claim.
+/// Keycloak emits realm roles (e.g. `NeosMax`, `NeosPro`) as the `groups`
+/// claim, so a value like `ADMIN_GROUP=NeosMax` makes anyone holding that
+/// realm role an admin in duapi without per-user maintenance.
+fn compute_is_admin(
+    username: &str,
+    extra: &HashMap<String, serde_json::Value>,
+) -> bool {
+    let admins: HashSet<String> = std::env::var("ADMIN_GROUP")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if admins.is_empty() {
+        return false;
+    }
+    if admins.contains(&username.to_ascii_lowercase()) {
+        return true;
+    }
+    extra
+        .get("groups")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .any(|g| admins.contains(&g.to_ascii_lowercase()))
+        })
+        .unwrap_or(false)
+}
+
+fn api_audiences(cfg: &OidcConfig) -> Vec<String> {
+    std::env::var("OIDC_API_AUDIENCES")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec![cfg.client_id.clone()])
 }
 
 pub fn config() -> Option<&'static OidcConfig> {
@@ -390,13 +499,7 @@ fn map_to_internal(id: IdTokenClaims, cfg: &OidcConfig, ttl_secs: u64) -> Result
         .ok_or_else(|| anyhow!("id_token missing username claim"))?
         .to_string();
 
-    let admins: HashSet<String> = std::env::var("ADMIN_GROUP")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let is_admin = admins.contains(&username.to_ascii_lowercase());
+    let is_admin = compute_is_admin(&username, &id.extra);
 
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

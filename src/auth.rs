@@ -13,7 +13,21 @@ use axum_extra::{
 use jsonwebtoken::{decode, DecodingKey, EncodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::OnceLock;
+
+/// Optional async fallback verifier for non-HS256 bearers (e.g. Keycloak
+/// RS256 access_tokens forwarded by the neos proxy after token-exchange).
+/// Registered once at boot from the binary that owns the OIDC config.
+pub type BearerVerifier =
+    fn(String) -> Pin<Box<dyn Future<Output = Option<Claims>> + Send>>;
+
+pub static EXTRA_VERIFIER: OnceLock<BearerVerifier> = OnceLock::new();
+
+pub fn set_extra_verifier(f: BearerVerifier) {
+    let _ = EXTRA_VERIFIER.set(f);
+}
 
 // ---- Keys (JWT) ----
 pub struct Keys {
@@ -115,16 +129,26 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Extract the token from the authorization header
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|_| AuthError::InvalidToken)?;
-        // Decode the user data
-        let token_data = decode::<Claims>(bearer.token(), &keys().decoding, &Validation::default())
-            .map_err(|_| AuthError::InvalidToken)?;
+        let token = bearer.token();
 
-        Ok(token_data.claims)
+        // Internal HS256 token (issued by /api/login or /api/auth/callback).
+        if let Ok(td) = decode::<Claims>(token, &keys().decoding, &Validation::default()) {
+            return Ok(td.claims);
+        }
+
+        // Fallback: Keycloak/OIDC RS256 access_token. Used when callers go
+        // through the neos proxy's token-exchange path (`aud=dutopia-mcp`).
+        if let Some(verifier) = EXTRA_VERIFIER.get() {
+            if let Some(claims) = verifier(token.to_string()).await {
+                return Ok(claims);
+            }
+        }
+
+        Err(AuthError::InvalidToken)
     }
 }
 
