@@ -42,7 +42,7 @@
     "svelte-check": "^4.0.0",
     "tailwindcss": "^4",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3"
+    "vite": "^8.0.10"
   },
   "overrides": {
     "cookie": "^0.7.2"
