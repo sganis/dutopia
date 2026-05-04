@@ -12,7 +12,32 @@ use std::time::{Duration, Instant};
 use dutopia::auth::Claims;
 
 static CONFIG: OnceLock<Option<OidcConfig>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static JWKS_CACHE: OnceLock<Mutex<JwksCache>> = OnceLock::new();
+
+/// Build the shared reqwest client used for OIDC backchannel calls. If
+/// `OIDC_CA_CERT` is set, its PEM contents are added as an additional trust
+/// root — required for dev/internal IdPs whose cert chain isn't in webpki.
+fn build_http_client() -> Result<reqwest::Client> {
+    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    if let Ok(p) = std::env::var("OIDC_CA_CERT") {
+        let p = p.trim();
+        if !p.is_empty() {
+            let pem = std::fs::read(p)
+                .with_context(|| format!("reading OIDC_CA_CERT from {p}"))?;
+            for cert in reqwest::Certificate::from_pem_bundle(&pem)
+                .context("parsing OIDC_CA_CERT as PEM bundle")?
+            {
+                b = b.add_root_certificate(cert);
+            }
+        }
+    }
+    b.build().context("building OIDC HTTP client")
+}
+
+fn http() -> &'static reqwest::Client {
+    HTTP_CLIENT.get().expect("OIDC HTTP client not initialized")
+}
 
 const JWKS_TTL: Duration = Duration::from_secs(3600);
 
@@ -89,10 +114,12 @@ pub async fn init() -> Result<()> {
     validate_post_login_redirect(&post_login_redirect, &redirect_uri)
         .context("OIDC_POST_LOGIN_REDIRECT rejected")?;
 
+    let client = build_http_client()?;
+    let _ = HTTP_CLIENT.set(client);
+
     let disc_url = format!("{}/.well-known/openid-configuration", issuer);
-    let disc: Discovery = reqwest::Client::new()
+    let disc: Discovery = http()
         .get(&disc_url)
-        .timeout(Duration::from_secs(10))
         .send()
         .await
         .with_context(|| format!("fetching OIDC discovery from {disc_url}"))?
@@ -210,10 +237,9 @@ pub async fn exchange_and_verify(
         ("client_secret", &cfg.client_secret),
         ("code_verifier", pkce_verifier),
     ];
-    let tok: TokenResponse = reqwest::Client::new()
+    let tok: TokenResponse = http()
         .post(&cfg.token_endpoint)
         .form(&params)
-        .timeout(Duration::from_secs(10))
         .send()
         .await
         .context("token endpoint request")?
@@ -238,9 +264,8 @@ async fn get_jwk(kid: &str, cfg: &OidcConfig) -> Result<Jwk> {
         }
     }
     // Refetch
-    let jwks: Jwks = reqwest::Client::new()
+    let jwks: Jwks = http()
         .get(&cfg.jwks_uri)
-        .timeout(Duration::from_secs(10))
         .send()
         .await
         .context("JWKS fetch")?
