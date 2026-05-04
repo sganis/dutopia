@@ -1,10 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo test *)",
-      "Bash(cargo clippy *)",
-      "Bash(npm run *)",
-      "Read(//Users/san/dev/dutopia/browser/**)",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin dusum\")",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dusum\")",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duscan --bin dusum\")",
@@ -37,22 +33,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:rustsec.org)",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin duapi\")",
-      "Bash(xargs grep *)",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi cleanup:: email::\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duapi cleanup::\")",
-      "Read(//tmp/**)",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --lib analytic\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin duapi --tests\")",
-      "Bash(npm install *)",
-      "Bash(npm audit *)",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p rand 2>nul\")",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat tree -p glib 2>nul\")",
-      "Bash(grep -E \"\\\\.\\(rs|ts|svelte\\)$\")",
-      "Bash(head -228 src/bin/duapi/handler.rs)",
-      "Bash(printf '\\\\n#[cfg\\(test\\)]\\\\n#[path = \"handler_tests.rs\"]\\\\nmod tests;\\\\n')",
-      "Bash(mv src/bin/duapi/handler.rs.new src/bin/duapi/handler.rs)",
-      "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat clippy --bin duapi --tests -- -D warnings\")"
+      "Bash(mv /home/san/dev/dutopia /home/san/dev/dutopia.broken-backup)",
+      "Bash(git clone *)",
+      "Bash(git pull *)"
     ]
   }
 }
