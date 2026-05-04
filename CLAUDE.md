@@ -8,10 +8,9 @@ Dutopia is a Rust toolkit for high-scale filesystem analytics. It turns massive 
 
 ## Build & Development Commands
 
-### Rust Backend (rs/)
+### Rust Backend
 
 ```bash
-cd rs
 cargo build --release        # Build all binaries
 cargo test                   # Run all tests
 cargo test test_name         # Run a specific test
@@ -49,9 +48,9 @@ filesystem → duscan → [raw CSV] → dusum → [aggregated CSV] → duapi →
                               duhuman (optional human-readable conversion)
 ```
 
-### Binaries (rs/src/bin/)
+### Binaries (src/bin/)
 
-Each binary is a directory with focused modules under `rs/src/bin/<name>/`:
+Each binary is a directory with focused modules under `src/bin/<name>/`:
 
 - **duscan** — Multi-threaded filesystem scanner. Streams metadata as CSV/zstd with 32MB buffer batching.
 - **dusum** — Aggregates raw scan data into rollups by folder, user, and age bucket (0=<60d, 1=60-600d, 2=>600d).
@@ -60,7 +59,7 @@ Each binary is a directory with focused modules under `rs/src/bin/<name>/`:
 - **duzip** — Bidirectional CSV ↔ Zstandard compression. Single-file binary.
 - **dumachine** — Binary data processor. Single-file binary.
 
-### Shared Library (rs/src/)
+### Shared Library (src/)
 
 - `lib.rs` — Re-exports util, auth, storage
 - `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su)

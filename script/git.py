@@ -5,16 +5,9 @@ import re
 from pathlib import Path
 import shutil
 
-# detect repo root (if script is inside rs/, go up one level)
 SCRIPT_DIR = Path(__file__).resolve().parent
-if (SCRIPT_DIR / "Cargo.toml").exists():
-    # script is inside rs/
-    REPO_DIR = SCRIPT_DIR.parent
-    RS_DIR = SCRIPT_DIR
-else:
-    # script is in repo root
-    REPO_DIR = SCRIPT_DIR
-    RS_DIR = SCRIPT_DIR / "rs"
+REPO_DIR = SCRIPT_DIR.parent if SCRIPT_DIR.name == "script" else SCRIPT_DIR
+RS_DIR = REPO_DIR
 
 BINARY_NAME = "duscan.exe"
 

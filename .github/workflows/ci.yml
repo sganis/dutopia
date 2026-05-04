@@ -29,17 +29,15 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rs/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build Rust project (rs/)
-        working-directory: rs
+      - name: Build Rust project
         run: cargo build -r
 
-      - name: Test Rust project (rs/)
-        working-directory: rs
+      - name: Test Rust project
         run: cargo test -r
 
       - name: Setup Node.js
@@ -59,7 +57,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dutopia-${{ matrix.os }}-rust
-          path: rs/target/**
+          path: target/**
           if-no-files-found: error
 
       - name: Upload Svelte artifacts
@@ -82,12 +80,10 @@ jobs:
         run: cargo install cargo-edit
 
       - name: Bump patch version
-        working-directory: rs
         run: cargo set-version --bump patch
 
       - name: Get new version
         id: cargo_version
-        working-directory: rs
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           echo "Detected version: $VERSION"
@@ -100,7 +96,7 @@ jobs:
           echo "Committing version bump to $VERSION"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add rs/Cargo.toml rs/Cargo.lock
+          git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
           git push origin HEAD:${GITHUB_REF_NAME}
 

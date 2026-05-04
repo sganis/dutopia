@@ -1,6 +1,10 @@
 {
   "permissions": {
     "allow": [
+      "Bash(cargo test *)",
+      "Bash(cargo clippy *)",
+      "Bash(npm run *)",
+      "Read(//Users/san/dev/dutopia/browser/**)",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat check --bin dusum\")",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin dusum\")",
       "Bash(cmd //c \"c:\\\\Dev\\\\cargo.bat test --bin duscan --bin dusum\")",
