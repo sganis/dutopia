@@ -28,7 +28,7 @@
 		"postcss": "^8.5.12",
 		"rollup": "^4.59.0",
 		"svelecte": "^5",
-		"svelte": "^5.53.6",
+		"svelte": "^5.55.7",
 		"svelte-awesome-color-picker": "^4.0.2",
 		"svelte-check": "^4",
 		"tailwindcss": "^4",
