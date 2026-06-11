@@ -59,6 +59,7 @@ jobs:
           name: dutopia-${{ matrix.os }}-rust
           path: target/**
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Svelte artifacts
         uses: actions/upload-artifact@v4
@@ -66,6 +67,7 @@ jobs:
           name: dutopia-${{ matrix.os }}-browser
           path: browser/build/**
           if-no-files-found: warn
+          retention-days: 1
 
   release:
     runs-on: ubuntu-latest
