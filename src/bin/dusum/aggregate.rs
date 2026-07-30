@@ -1,9 +1,6 @@
 // rs/src/bin/dusum/aggregate.rs
 use std::collections::HashMap;
 
-#[cfg(unix)]
-use std::ffi::CStr;
-
 /// Pick the native separator byte for a raw path. A backslash anywhere in the
 /// path (or a drive-letter prefix) means Windows-native; otherwise Unix.
 fn separator(path: &[u8]) -> u8 {
@@ -116,34 +113,10 @@ pub fn resolve_user(uid: u32, cache: &mut HashMap<u32, String>) -> String {
     name
 }
 
-#[cfg(unix)]
+/// Moved to `dutopia::util::username_from_uid` so `dudb` per-file ingest
+/// resolves ownership identically; kept as a thin wrapper for dusum callers.
 pub fn get_username_from_uid(uid: u32) -> String {
-    unsafe {
-        let passwd = libc::getpwuid(uid);
-        if passwd.is_null() {
-            return "UNK".to_string();
-        }
-        let name_ptr = (*passwd).pw_name;
-        if name_ptr.is_null() {
-            return "UNK".to_string();
-        }
-        match CStr::from_ptr(name_ptr).to_str() {
-            Ok(name) => name.to_string(),
-            Err(_) => "UNK".to_string(),
-        }
-    }
-}
-
-#[cfg(not(unix))]
-pub fn get_username_from_uid(_uid: u32) -> String {
-    // Windows duscan does not record per-file ownership yet (uid is always 0).
-    // Use the interactive user as a stand-in so the duapi per-user filter has
-    // something that matches the login identity. Falls back to "UNK" if the
-    // environment is missing USERNAME (e.g. running as a service).
-    std::env::var("USERNAME")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "UNK".to_string())
+    dutopia::util::username_from_uid(uid)
 }
 
 #[cfg(test)]

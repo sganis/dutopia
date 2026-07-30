@@ -1,4 +1,5 @@
 // rs/src/db.rs
+use crate::item::FsItemOut;
 use anyhow::{anyhow, Context, Result};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{OpenFlags, ToSql};
@@ -8,7 +9,7 @@ use std::path::Path;
 
 pub type DbPool = r2d2::Pool<SqliteConnectionManager>;
 
-pub const SUPPORTED_SCHEMA_VERSION: &str = "2";
+pub const SUPPORTED_SCHEMA_VERSION: &str = "3";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Age {
@@ -181,6 +182,99 @@ pub fn list_children(
         .collect())
 }
 
+/// True when the DB carries per-file rows (`dudb --raw`), i.e. /api/files can
+/// be served from the `files` table instead of the live filesystem.
+pub fn has_files(pool: &DbPool) -> Result<bool> {
+    let conn = pool.get().context("acquiring connection")?;
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'has_files'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(v.as_deref() == Some("1"))
+}
+
+/// Files directly inside `dir_path` from the scan snapshot, mirroring
+/// `item::get_items` semantics (regular files only, sorted by name, same
+/// user/age filters). `limit` is pushed into SQL so a folder with millions of
+/// files never materializes in memory. Nonexistent folders return an empty
+/// Vec, matching `list_children`.
+pub fn list_files(
+    pool: &DbPool,
+    dir_path: &str,
+    user_filter: &[String],
+    age_filter: Option<u8>,
+    limit: usize,
+) -> Result<Vec<FsItemOut>> {
+    let conn = pool.get().context("acquiring connection")?;
+
+    let mut sql = String::from(
+        "SELECT f.name, u.name, f.size, f.atime, f.mtime
+         FROM   paths p
+         JOIN   files f ON f.folder_id = p.id
+         JOIN   users u ON u.id        = f.user_id
+         WHERE  p.full_path = ?1",
+    );
+
+    let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(dir_path.to_string())];
+
+    if let Some(a) = age_filter {
+        sql.push_str(&format!(" AND f.age = ?{}", params.len() + 1));
+        params.push(Box::new(a as i64));
+    }
+
+    if !user_filter.is_empty() {
+        sql.push_str(" AND u.name IN (");
+        for (i, u) in user_filter.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("?{}", params.len() + 1));
+            params.push(Box::new(u.clone()));
+        }
+        sql.push(')');
+    }
+
+    sql.push_str(&format!(" ORDER BY f.name LIMIT ?{}", params.len() + 1));
+    params.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+
+    let rows = stmt.query_map(param_refs.as_slice(), |r| {
+        Ok(FsItemOut {
+            path: join_child_path(dir_path, &r.get::<_, String>(0)?),
+            owner: r.get(1)?,
+            size: r.get(2)?,
+            accessed: r.get(3)?,
+            modified: r.get(4)?,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Join a stored folder path and a filename in the folder's native form
+/// (mirrors `dusum`'s separator heuristic: any backslash or a drive prefix
+/// means Windows). Roots like `/` and `C:\` already end with the separator.
+fn join_child_path(folder: &str, name: &str) -> String {
+    let bytes = folder.as_bytes();
+    let windows = folder.contains('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
+    let sep = if windows { '\\' } else { '/' };
+    if folder.ends_with(sep) {
+        format!("{folder}{name}")
+    } else {
+        format!("{folder}{sep}{name}")
+    }
+}
+
 pub mod test_support {
     //! Shared helpers for building a temp SQLite DB so that handler tests and
     //! db tests don't duplicate fixture code.
@@ -223,9 +317,9 @@ pub mod test_support {
     fn populate(path: &Path) {
         let _ = std::fs::remove_file(path);
         let conn = Connection::open(path).unwrap();
-        // Schema v2: synthetic root has full_path='' (empty); platform roots
-        // (here `/`) parent to it. Mirrors what dudb produces from a Linux
-        // dusum CSV.
+        // Schema v3: synthetic root has full_path='' (empty); platform roots
+        // (here `/`) parent to it; per-file rows live in `files`. Mirrors
+        // what `dudb --raw` produces from a Linux dusum + duscan CSV pair.
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;
              CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
@@ -237,9 +331,15 @@ pub mod test_support {
                 atime INTEGER NOT NULL, mtime INTEGER NOT NULL,
                 PRIMARY KEY (path_id, user_id, age)
              ) WITHOUT ROWID;
+             CREATE TABLE files (
+                folder_id INTEGER NOT NULL, name TEXT NOT NULL,
+                user_id INTEGER NOT NULL, age INTEGER NOT NULL,
+                size INTEGER NOT NULL, atime INTEGER NOT NULL, mtime INTEGER NOT NULL,
+                PRIMARY KEY (folder_id, name)
+             ) WITHOUT ROWID;
              CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE INDEX idx_paths_parent ON paths(parent_id);
-             INSERT INTO metadata(key,value) VALUES('schema_version','2');
+             INSERT INTO metadata(key,value) VALUES('schema_version','3'),('has_files','1');
              INSERT INTO users(name) VALUES('alice'),('bob');
              INSERT INTO paths(full_path, parent_id) VALUES('', NULL);
              INSERT INTO paths(full_path, parent_id) VALUES(
@@ -255,7 +355,17 @@ pub mod test_support {
                 1, 1, 50, 50, 0, 1600000000, 1600000100),
                ((SELECT id FROM paths WHERE full_path='/docs'),
                 (SELECT id FROM users WHERE name='alice'),
-                2, 3, 600, 300, 300, 1500000000, 1500000050);",
+                2, 3, 600, 300, 300, 1500000000, 1500000050);
+             INSERT INTO files VALUES
+               ((SELECT id FROM paths WHERE full_path='/docs'),
+                'a.txt', (SELECT id FROM users WHERE name='alice'),
+                2, 400, 1500000000, 1500000050),
+               ((SELECT id FROM paths WHERE full_path='/docs'),
+                'b.txt', (SELECT id FROM users WHERE name='alice'),
+                2, 200, 1500000000, 1500000050),
+               ((SELECT id FROM paths WHERE full_path='/docs'),
+                'c.txt', (SELECT id FROM users WHERE name='bob'),
+                0, 50, 1700000000, 1700000100);",
         )
         .unwrap();
     }
@@ -313,6 +423,60 @@ mod tests {
     }
 
     #[test]
+    fn has_files_true_on_fixture() {
+        let (_db, pool) = build_pool();
+        assert!(has_files(&pool).unwrap());
+    }
+
+    #[test]
+    fn list_files_returns_sorted_full_paths() {
+        let (_db, pool) = build_pool();
+        let items = list_files(&pool, "/docs", &[], None, 100).unwrap();
+        let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, vec!["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"]);
+        assert_eq!(items[0].owner, "alice");
+        assert_eq!(items[0].size, 400);
+        assert_eq!(items[2].owner, "bob");
+    }
+
+    #[test]
+    fn list_files_user_and_age_filters() {
+        let (_db, pool) = build_pool();
+        let alice = list_files(&pool, "/docs", &["alice".to_string()], None, 100).unwrap();
+        assert_eq!(alice.len(), 2);
+        assert!(alice.iter().all(|i| i.owner == "alice"));
+
+        let age0 = list_files(&pool, "/docs", &[], Some(0), 100).unwrap();
+        assert_eq!(age0.len(), 1);
+        assert_eq!(age0[0].path, "/docs/c.txt");
+    }
+
+    #[test]
+    fn list_files_limit_pushed_into_sql() {
+        let (_db, pool) = build_pool();
+        let items = list_files(&pool, "/docs", &[], None, 2).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].path, "/docs/a.txt");
+    }
+
+    #[test]
+    fn list_files_unknown_folder_is_empty() {
+        let (_db, pool) = build_pool();
+        assert!(list_files(&pool, "/nope", &[], None, 100).unwrap().is_empty());
+        // Folder-level paths with no file rows are empty too, not an error.
+        assert!(list_files(&pool, "/", &[], None, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn join_child_path_native_forms() {
+        assert_eq!(join_child_path("/", "f"), "/f");
+        assert_eq!(join_child_path("/a/b", "f"), "/a/b/f");
+        assert_eq!(join_child_path("C:\\", "f"), "C:\\f");
+        assert_eq!(join_child_path("C:\\Users", "f"), "C:\\Users\\f");
+        assert_eq!(join_child_path("\\\\srv\\shr", "f"), "\\\\srv\\shr\\f");
+    }
+
+    #[test]
     fn list_children_empty_path_returns_platform_roots() {
         // Frontend's synthetic-root marker. On the Linux fixture, this is `/`.
         let (_db, pool) = build_pool();
@@ -349,9 +513,15 @@ mod tests {
                 atime INTEGER NOT NULL, mtime INTEGER NOT NULL,
                 PRIMARY KEY (path_id, user_id, age)
              ) WITHOUT ROWID;
+             CREATE TABLE files (
+                folder_id INTEGER NOT NULL, name TEXT NOT NULL,
+                user_id INTEGER NOT NULL, age INTEGER NOT NULL,
+                size INTEGER NOT NULL, atime INTEGER NOT NULL, mtime INTEGER NOT NULL,
+                PRIMARY KEY (folder_id, name)
+             ) WITHOUT ROWID;
              CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE INDEX idx_paths_parent ON paths(parent_id);
-             INSERT INTO metadata(key,value) VALUES('schema_version','2');
+             INSERT INTO metadata(key,value) VALUES('schema_version','3'),('has_files','1');
              INSERT INTO users(name) VALUES('San');
              INSERT INTO paths(full_path, parent_id) VALUES('', NULL);
              INSERT INTO paths(full_path, parent_id) VALUES('C:\\',
@@ -369,7 +539,11 @@ mod tests {
                 0, 5, 500, 500, 0, 1, 1),
                ((SELECT id FROM paths WHERE full_path='\\\\srv'),
                 (SELECT id FROM users WHERE name='San'),
-                0, 2, 200, 200, 0, 1, 1);",
+                0, 2, 200, 200, 0, 1, 1);
+             INSERT INTO files VALUES
+               ((SELECT id FROM paths WHERE full_path='C:\\Users'),
+                'notes.txt', (SELECT id FROM users WHERE name='San'),
+                0, 10, 1, 1);",
         )
         .unwrap();
         drop(conn);
@@ -387,6 +561,11 @@ mod tests {
         let drive_children = list_children(&pool, "C:\\", &[], None).unwrap();
         assert_eq!(drive_children.len(), 1);
         assert_eq!(drive_children[0].path, "C:\\Users");
+
+        // File paths joined with the folder's native separator.
+        let files = list_files(&pool, "C:\\Users", &[], None, 10).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "C:\\Users\\notes.txt");
 
         drop(cleanup);
     }

@@ -14,6 +14,7 @@ It is modular — use only the components you need.
 - **duscan** — high-performance scanner that traverses the filesystem with concurrency and streams metadata for both files and directories.  
 - **duhuman** — converts machine data (epochs, uids/gids, mode bits) into human fields (local dates, usernames, octal perms).  
 - **dusum** — reads `duscan` output and produces rollups by folder, user, and file-age buckets.  
+- **dudb** — builds the SQLite database from `dusum` output; with `--raw` it also indexes every file so listings need no filesystem access.  
 - **duzip** — compresses/expands CSV ↔ Zstandard (`.zst`) binary streams.  
 - **duapi** — lightweight REST API server exposing aggregated data.  
 
@@ -69,6 +70,7 @@ Binaries are under `target/release/`:
 * `duscan`
 * `duhuman`
 * `dusum`
+* `dudb`
 * `duzip`
 * `duapi`
 
@@ -94,6 +96,18 @@ Binaries are under `target/release/`:
 ./dusum home.csv -o home.sum.csv
 ```
 
+### Build database
+
+```bash
+# folder-level stats only
+./dudb home.sum.csv -o home.db
+
+# also index every file, so /api/files is served from the DB
+# (required in production where the API host cannot see the filesystem;
+#  run on a host that resolves the same uid→username mapping as dusum)
+./dudb home.sum.csv --raw home.csv -o home.db
+```
+
 ### Compress / Decompress
 
 ```bash
@@ -107,7 +121,7 @@ Binaries are under `target/release/`:
 ### Serve API
 
 ```bash
-./duapi home.sum.csv --port 8000
+./duapi home.db --port 8000
 ```
 
 Open the **Svelte frontend** in your browser to explore results.

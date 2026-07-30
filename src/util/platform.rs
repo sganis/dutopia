@@ -1,6 +1,40 @@
 // rs/src/util/platform.rs
 use std::path::Path;
 
+/// Resolve a uid to a username via the local account database. Shared by
+/// `dusum` (folder aggregation) and `dudb` (per-file ingest) so both resolve
+/// ownership identically; run them on hosts in the same identity domain.
+#[cfg(unix)]
+pub fn username_from_uid(uid: u32) -> String {
+    use std::ffi::CStr;
+    unsafe {
+        let passwd = libc::getpwuid(uid);
+        if passwd.is_null() {
+            return "UNK".to_string();
+        }
+        let name_ptr = (*passwd).pw_name;
+        if name_ptr.is_null() {
+            return "UNK".to_string();
+        }
+        match CStr::from_ptr(name_ptr).to_str() {
+            Ok(name) => name.to_string(),
+            Err(_) => "UNK".to_string(),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn username_from_uid(_uid: u32) -> String {
+    // Windows duscan does not record per-file ownership yet (uid is always 0).
+    // Use the interactive user as a stand-in so the duapi per-user filter has
+    // something that matches the login identity. Falls back to "UNK" if the
+    // environment is missing USERNAME (e.g. running as a service).
+    std::env::var("USERNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "UNK".to_string())
+}
+
 #[cfg(windows)]
 pub fn get_rid(path: &Path) -> std::io::Result<u32> {
     use std::os::windows::ffi::OsStrExt;

@@ -44,12 +44,15 @@ pub fn count_lines(path: &Path) -> Result<usize> {
     Ok(count)
 }
 
+/// Returns the ingest counters plus the full path→id cache, which the `--raw`
+/// per-file pass reuses to resolve each file's parent folder without hitting
+/// the (unindexed at that point) paths table.
 pub fn ingest_csv<F: FnMut(u64)>(
     conn: &mut Connection,
     csv_path: &Path,
     total_data_lines: usize,
     mut on_progress: F,
-) -> Result<IngestStats> {
+) -> Result<(IngestStats, HashMap<String, i64>)> {
     let mut user_cache: HashMap<String, i64> = HashMap::new();
     let mut path_cache: HashMap<String, i64> = HashMap::new();
     let mut stats = IngestStats::default();
@@ -174,7 +177,7 @@ pub fn ingest_csv<F: FnMut(u64)>(
     tx.commit()?;
 
     backfill_missing_parents(conn, &path_cache)?;
-    Ok(stats)
+    Ok((stats, path_cache))
 }
 
 /// Defensive pass: if the CSV was not sorted in dusum order, some paths may
@@ -315,7 +318,7 @@ mod tests {
     fn linux_ingest_preserves_paths_verbatim() {
         let f = linux_csv();
         let mut c = fresh_conn();
-        let s = ingest_csv(&mut c, f.path(), 3, |_| {}).unwrap();
+        let (s, _) = ingest_csv(&mut c, f.path(), 3, |_| {}).unwrap();
         assert_eq!(s.rows_inserted, 3);
         assert_eq!(s.users_inserted, 2);
         // synth root + "/" + "/docs"
@@ -336,7 +339,7 @@ mod tests {
     fn windows_ingest_preserves_native_separators() {
         let f = windows_csv();
         let mut c = fresh_conn();
-        let s = ingest_csv(&mut c, f.path(), 4, |_| {}).unwrap();
+        let (s, _) = ingest_csv(&mut c, f.path(), 4, |_| {}).unwrap();
         assert_eq!(s.rows_inserted, 4);
         // synth + C:\ + C:\Users + C:\Users\San + D:\
         assert_eq!(s.paths_inserted, 5);
@@ -357,7 +360,7 @@ mod tests {
     fn unc_ingest_preserves_native_form() {
         let f = unc_csv();
         let mut c = fresh_conn();
-        let s = ingest_csv(&mut c, f.path(), 3, |_| {}).unwrap();
+        let (s, _) = ingest_csv(&mut c, f.path(), 3, |_| {}).unwrap();
         assert_eq!(s.rows_inserted, 3);
         // synth + \\srv + \\srv\shr + \\srv\shr\dir
         assert_eq!(s.paths_inserted, 4);
@@ -379,7 +382,7 @@ mod tests {
         )
         .unwrap();
         let mut c = fresh_conn();
-        let s = ingest_csv(&mut c, f.path(), 3, |_| {}).unwrap();
+        let (s, _) = ingest_csv(&mut c, f.path(), 3, |_| {}).unwrap();
         assert_eq!(s.rows_inserted, 1);
     }
 

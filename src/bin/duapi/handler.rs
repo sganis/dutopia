@@ -194,6 +194,46 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
     }
 
     let age = q.age;
+    let cap = crate::query::max_page_size();
+
+    // Preferred path: per-file rows ingested by `dudb --raw`. In production
+    // the API host has no access to the scanned filesystem, so the live
+    // read_dir below only serves dev setups / folder-only DBs.
+    if crate::files_indexed() {
+        let pool = get_db().clone();
+        let folder_for_task = folder.clone();
+        // Ask for one row past the cap so truncation is detectable without
+        // ever materializing an oversized folder in memory.
+        let fut = tokio::task::spawn_blocking(move || {
+            db::list_files(&pool, &folder_for_task, &requested, age, cap + 1)
+        });
+        return match fut.await {
+            Err(join_err) => {
+                tracing::error!(err = %join_err, "500 Task Join Error /api/files");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {join_err}"),
+                )
+                    .into_response()
+            }
+            Ok(Err(e)) => {
+                tracing::error!(path = %folder, err = %e, "500 list_files ERROR /api/files");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("list_files error: {e}"),
+                )
+                    .into_response()
+            }
+            Ok(Ok(mut items)) => {
+                if items.len() > cap {
+                    tracing::warn!(path = %folder, cap, "/api/files truncated");
+                    items.truncate(cap);
+                }
+                tracing::info!(items = items.len(), "200 OK /api/files");
+                Json(items).into_response()
+            }
+        };
+    }
 
     let fut = tokio::task::spawn_blocking(move || get_items(folder, &requested, age));
 
@@ -219,7 +259,6 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
             }
         }
         Ok(Ok(mut items)) => {
-            let cap = crate::query::max_page_size();
             if items.len() > cap {
                 tracing::warn!(total = items.len(), cap, "/api/files truncated");
                 items.truncate(cap);

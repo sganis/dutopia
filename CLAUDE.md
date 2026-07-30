@@ -32,9 +32,10 @@ npm run check                # TypeScript/Svelte type checking
 ### Running the Full Pipeline
 
 ```bash
-./duscan /path -o scan.csv        # 1. Scan filesystem
-./dusum scan.csv -o sum.csv       # 2. Aggregate by folder/user/age
-./duapi sum.csv --port 8000       # 3. Serve REST API + frontend
+./duscan /path -o scan.csv               # 1. Scan filesystem
+./dusum scan.csv -o sum.csv              # 2. Aggregate by folder/user/age
+./dudb sum.csv --raw scan.csv -o du.db   # 3. Build SQLite DB (--raw adds per-file rows)
+./duapi du.db --port 8000                # 4. Serve REST API + frontend
 ```
 
 ## Architecture
@@ -42,8 +43,9 @@ npm run check                # TypeScript/Svelte type checking
 ### Pipeline
 
 ```
-filesystem → duscan → [raw CSV] → dusum → [aggregated CSV] → duapi → REST API → Svelte SPA
-                                                                ↑
+filesystem → duscan → [raw CSV] → dusum → [aggregated CSV] → dudb → [SQLite DB] → duapi → REST API → Svelte SPA
+                          │                                    ↑
+                          └────────────── --raw ───────────────┘
                               duzip (optional CSV ↔ .zst compression)
                               duhuman (optional human-readable conversion)
 ```
@@ -54,17 +56,20 @@ Each binary is a directory with focused modules under `src/bin/<name>/`:
 
 - **duscan** — Multi-threaded filesystem scanner. Streams metadata as CSV/zstd with 32MB buffer batching.
 - **dusum** — Aggregates raw scan data into rollups by folder, user, and age bucket (0=<60d, 1=60-600d, 2=>600d).
-- **duapi** — Axum REST API with JWT auth, in-memory trie-based filesystem index, optional TLS. Serves the Svelte SPA from `browser/public/`.
+- **dudb** — Builds the SQLite DB from the dusum CSV (`paths`/`users`/`stats` tables). With `--raw scan.csv` it also ingests per-file rows into the `files` table so `/api/files` is served from the DB instead of a live filesystem read (required in production where the API host cannot see the scanned filesystem). Resolves uid→username via the local account database, so run it on a host in the same identity domain as dusum.
+- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` uses the DB `files` table when present (`has_files` metadata), else falls back to a live `read_dir`.
 - **duhuman** — Converts machine data (epochs, UIDs, mode bits) to human-readable format. Single-file binary.
 - **duzip** — Bidirectional CSV ↔ Zstandard compression. Single-file binary.
 - **dumachine** — Binary data processor. Single-file binary.
 
 ### Shared Library (src/)
 
-- `lib.rs` — Re-exports util, auth, storage
+- `lib.rs` — Re-exports util, auth, storage, db, item, query, analytic
 - `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su)
+- `db.rs` — Read-only SQLite pool + queries over the dudb DB (`list_children`, `list_files`, `has_files`)
+- `item.rs` — Live-filesystem file listing (`get_items`), the /api/files fallback when the DB has no file index
 - `storage.rs` — Cross-platform storage info (Unix: statvfs, Windows: Win32 API)
-- `util/` — Row struct, CSV helpers, human formatting, path utilities, platform-specific filesystem functions
+- `util/` — Row struct, CSV helpers, age bucketing (shared by dusum/dudb), human formatting, path utilities, platform-specific functions (incl. uid→username)
 
 ### Frontend (browser/)
 

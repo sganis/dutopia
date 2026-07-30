@@ -35,6 +35,9 @@ use handler::{get_files_handler, get_folders_handler, health_handler, login_hand
 
 static DB_POOL: OnceLock<DbPool> = OnceLock::new();
 static USERS: OnceLock<Vec<String>> = OnceLock::new();
+/// Whether the DB carries per-file rows (`dudb --raw`); probed once at
+/// startup. When false, /api/files falls back to the live filesystem.
+static FILES_INDEXED: OnceLock<bool> = OnceLock::new();
 
 #[cfg(test)]
 static TEST_DB: OnceLock<db::test_support::TempDb> = OnceLock::new();
@@ -140,6 +143,19 @@ async fn main() -> Result<()> {
     })?;
     let users = db::list_users(&pool).context("loading user list")?;
     println!("Loaded {} users", users.len());
+
+    let files_indexed = db::has_files(&pool).unwrap_or(false);
+    if files_indexed {
+        println!("File index: present (/api/files served from DB)");
+    } else {
+        println!(
+            "{}",
+            "File index: absent (/api/files reads the live filesystem; \
+             rebuild with `dudb --raw <scan.csv>` to serve from DB)"
+                .yellow()
+        );
+    }
+    let _ = FILES_INDEXED.set(files_indexed);
 
     if DB_POOL.set(pool).is_err() {
         eprintln!("{}", "FATAL: DB_POOL already initialized".red());
@@ -339,6 +355,11 @@ pub fn get_db() -> &'static DbPool {
 
 pub fn get_users() -> &'static Vec<String> {
     USERS.get().expect("User list not initialized")
+}
+
+/// Unset (only possible in tests that skip DB init) means "no file index".
+pub fn files_indexed() -> bool {
+    FILES_INDEXED.get().copied().unwrap_or(false)
 }
 
 #[cfg(test)]

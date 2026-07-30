@@ -134,7 +134,7 @@ fn tools_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "list_files",
-            "description": "Files directly inside `path` (live filesystem read, not the scan DB).",
+            "description": "Files directly inside `path` from the scan snapshot DB (falls back to a live filesystem read when the DB has no file index).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -355,6 +355,18 @@ async fn tool_list_files(claims: &Claims, args: Value) -> Result<Value, String> 
     }
     let users_t = users.clone();
     let path_t = path.clone();
+    // Snapshot DB when `dudb --raw` populated it; live filesystem otherwise
+    // (dev setups / folder-only DBs — mirrors handler.rs::get_files_handler).
+    if crate::files_indexed() {
+        let pool = get_db().clone();
+        let items = tokio::task::spawn_blocking(move || {
+            db::list_files(&pool, &path_t, &users_t, age, limit)
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| format!("query: {e}"))?;
+        return serde_json::to_value(items).map_err(|e| format!("serialize: {e}"));
+    }
     let mut items = tokio::task::spawn_blocking(move || item::get_items(path_t, &users_t, age))
         .await
         .map_err(|e| format!("join: {e}"))?
@@ -422,7 +434,7 @@ async fn tool_summary(claims: &Claims, args: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DB_POOL, TEST_DB, USERS};
+    use crate::{DB_POOL, FILES_INDEXED, TEST_DB, USERS};
     use serial_test::serial;
 
     fn init_db_once() {
@@ -432,9 +444,11 @@ mod tests {
         let temp_db = dutopia::db::test_support::build_test_db();
         let pool = dutopia::db::open_pool(&temp_db.path).expect("open_pool");
         let users = dutopia::db::list_users(&pool).expect("list_users");
+        let files_indexed = dutopia::db::has_files(&pool).expect("has_files");
         let _ = TEST_DB.set(temp_db);
         let _ = DB_POOL.set(pool);
         let _ = USERS.set(users);
+        let _ = FILES_INDEXED.set(files_indexed);
     }
 
     fn admin() -> Claims {
@@ -521,6 +535,27 @@ mod tests {
         let args = json!({ "path": "/" });
         let err = tool_list_files(&admin(), args).await.unwrap_err();
         assert!(err.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_files_returns_db_rows() {
+        init_db_once();
+        let args = json!({ "path": "/docs" });
+        let v = tool_list_files(&admin(), args).await.unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["path"], "/docs/a.txt");
+        assert_eq!(arr[2]["owner"], "bob");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_files_respects_limit_arg() {
+        init_db_once();
+        let args = json!({ "path": "/docs", "limit": 1 });
+        let v = tool_list_files(&admin(), args).await.unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

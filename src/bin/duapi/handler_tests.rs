@@ -3,12 +3,9 @@ use super::*;
 use axum::body::to_bytes;
 use axum::extract::Query;
 use serial_test::serial;
-#[cfg(unix)]
-use tempfile::tempdir;
 
-use crate::{DB_POOL, TEST_DB, USERS};
+use crate::{DB_POOL, FILES_INDEXED, TEST_DB, USERS};
 use dutopia::db::FolderOut;
-#[cfg(unix)]
 use dutopia::item::FsItemOut;
 
 const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -20,11 +17,13 @@ fn init_db_once() {
     let temp_db = dutopia::db::test_support::build_test_db();
     let pool = dutopia::db::open_pool(&temp_db.path).expect("open_pool");
     let users = dutopia::db::list_users(&pool).expect("list_users");
+    let files_indexed = dutopia::db::has_files(&pool).expect("has_files");
     // Keep the TempDb alive for the entire test run so the file is not
     // removed while the pool is still using it.
     let _ = TEST_DB.set(temp_db);
     let _ = DB_POOL.set(pool);
     let _ = USERS.set(users);
+    let _ = FILES_INDEXED.set(files_indexed);
 }
 
 #[tokio::test]
@@ -160,20 +159,17 @@ async fn test_get_files_handler_rejects_traversal() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn test_get_files_handler_unix_admin_ok() {
-    let dir = tempdir().unwrap();
-    let file_path = dir.path().join("a.txt");
-    std::fs::write(&file_path, b"hi").unwrap();
-
+#[serial]
+async fn test_get_files_handler_db_admin_ok() {
+    init_db_once();
     let claims = Claims {
         sub: "root".into(),
         is_admin: true,
         exp: 9_999_999_999usize,
     };
     let q = FilesQuery {
-        path: Some(dir.path().to_string_lossy().into()),
+        path: Some("/docs".into()),
         users: None,
         age: None,
     };
@@ -182,24 +178,67 @@ async fn test_get_files_handler_unix_admin_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
     let items: Vec<FsItemOut> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(items.len(), 1);
-    assert!(items[0].path.ends_with("a.txt"));
+    let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+    assert_eq!(paths, vec!["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"]);
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn test_get_files_handler_unix_non_admin_forbidden() {
-    let dir = tempdir().unwrap();
-    let file_path = dir.path().join("b.txt");
-    std::fs::write(&file_path, b"hi").unwrap();
-
+#[serial]
+async fn test_get_files_handler_db_filters() {
+    init_db_once();
     let claims = Claims {
         sub: "alice".into(),
         is_admin: false,
         exp: 9_999_999_999usize,
     };
+    // Non-admin restricted to self: only alice's files come back.
     let q = FilesQuery {
-        path: Some(dir.path().to_string_lossy().into()),
+        path: Some("/docs".into()),
+        users: Some("alice".into()),
+        age: Some(2),
+    };
+    let resp = get_files_handler(claims, Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+    let items: Vec<FsItemOut> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|i| i.owner == "alice"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_files_handler_clamps_to_max_page_size() {
+    init_db_once();
+    // SAFETY: we set then restore for test isolation.
+    unsafe { std::env::set_var("MAX_PAGE_SIZE", "2") };
+    let claims = Claims {
+        sub: "root".into(),
+        is_admin: true,
+        exp: 9_999_999_999usize,
+    };
+    let q = FilesQuery {
+        path: Some("/docs".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_files_handler(claims, Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+    let items: Vec<FsItemOut> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(items.len(), 2);
+    unsafe { std::env::remove_var("MAX_PAGE_SIZE") };
+}
+
+#[tokio::test]
+async fn test_get_files_handler_non_admin_forbidden() {
+    let claims = Claims {
+        sub: "alice".into(),
+        is_admin: false,
+        exp: 9_999_999_999usize,
+    };
+    // No user filter: rejected before any DB or filesystem access.
+    let q = FilesQuery {
+        path: Some("/docs".into()),
         users: None,
         age: None,
     };
