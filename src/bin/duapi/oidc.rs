@@ -6,6 +6,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,23 @@ use dutopia::auth::Claims;
 static CONFIG: OnceLock<Option<OidcConfig>> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static JWKS_CACHE: OnceLock<Mutex<JwksCache>> = OnceLock::new();
+static ENV_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record the directory holding the `.env` dotenvy loaded. dotenvy walks up
+/// from the cwd to find it, so the binary can run from anywhere under the repo
+/// (e.g. `target/debug`) while relative paths inside `.env` are written
+/// relative to the `.env` itself — resolve them against that directory.
+pub fn set_env_dir(dir: PathBuf) {
+    let _ = ENV_DIR.set(dir);
+}
+
+fn resolve_env_path(p: &str) -> PathBuf {
+    let path = Path::new(p);
+    match ENV_DIR.get() {
+        Some(dir) if path.is_relative() => dir.join(path),
+        _ => path.to_path_buf(),
+    }
+}
 
 /// Build the shared reqwest client used for OIDC backchannel calls. If
 /// `OIDC_CA_CERT` is set, its PEM contents are added as an additional trust
@@ -23,8 +41,9 @@ fn build_http_client() -> Result<reqwest::Client> {
     if let Ok(p) = std::env::var("OIDC_CA_CERT") {
         let p = p.trim();
         if !p.is_empty() {
-            let pem = std::fs::read(p)
-                .with_context(|| format!("reading OIDC_CA_CERT from {p}"))?;
+            let path = resolve_env_path(p);
+            let pem = std::fs::read(&path)
+                .with_context(|| format!("reading OIDC_CA_CERT from {}", path.display()))?;
             for cert in reqwest::Certificate::from_pem_bundle(&pem)
                 .context("parsing OIDC_CA_CERT as PEM bundle")?
             {

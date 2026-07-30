@@ -22,7 +22,7 @@ Each stage is a standalone binary. Stages have strict, documented contracts
 
 ## 2. Binaries
 
-All binaries live in `rs/src/bin/`. Build with `cargo build --release`
+All binaries live in `src/bin/`. Build with `cargo build --release`
 (Windows: use `cargo.bat` to set up MSVC env).
 
 ### 2.1 `duscan` — filesystem scanner
@@ -100,10 +100,14 @@ database consumed by `duapi`. Never run by the API server.
 dudb <input> [OPTIONS]
 
   -o, --output PATH        default: <stem>.db
+      --raw FILE           raw duscan CSV: also ingest per-file rows so
+                           /api/files is served from the DB
+      --age YOUNG,OLD      age cutoffs in days for per-file rows; must
+                           match what dusum ran with (default: 60,600)
       --rebuild            overwrite existing DB
 ```
 
-SQLite schema (v2):
+SQLite schema (v3):
 
 ```sql
 CREATE TABLE users (
@@ -135,6 +139,18 @@ CREATE TABLE metadata (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- populated only with --raw: one row per regular file
+CREATE TABLE files (
+  folder_id INTEGER NOT NULL,   -- FK -> paths.id (parent folder)
+  name      TEXT    NOT NULL,   -- filename only, not full path
+  user_id   INTEGER NOT NULL,   -- FK -> users.id
+  age       INTEGER NOT NULL,   -- bucket 0/1/2, frozen at ingest
+  size      INTEGER NOT NULL,
+  atime     INTEGER NOT NULL,
+  mtime     INTEGER NOT NULL,
+  PRIMARY KEY (folder_id, name)
+) WITHOUT ROWID;
 ```
 
 Design notes:
@@ -147,11 +163,22 @@ Design notes:
   every platform root, so `parent_id = <synthetic root>.id` lists all
   drives / `/`.
 - `stats` is `WITHOUT ROWID` — its PK is its natural clustering.
-- `metadata.schema_version = "2"` is verified at `duapi` startup.
-- Ingest pragmas are tuned for bulk insert (`synchronous=OFF`, WAL, 256 MB
-  cache, `temp_store=MEMORY`). Safe because the DB is rebuildable from the
-  CSV.
-- Indexes and `ANALYZE` run after bulk load.
+- `files` is `WITHOUT ROWID`, clustered on `(folder_id, name)`: one
+  folder's files live in contiguous pages, so a listing is a single
+  B-tree range scan with no secondary index. `metadata.has_files = 1`
+  records that a `--raw` ingest completed.
+- Per-file `age` is frozen at ingest time with the `--age` cutoffs, and
+  uid→username resolves against the ingest host's account database — run
+  `dudb` in the same identity domain as `dusum` (normally the same host,
+  same pipeline run).
+- Measured cost of the file index: ~52 B per file row; the whole DB comes
+  to ~0.46× the raw duscan CSV (see `doc/file-index-plan.md`).
+- `metadata.schema_version = "3"` is verified at `duapi` startup.
+- Ingest pragmas are tuned for bulk insert (`synchronous=OFF`, WAL, 8 KB
+  pages, 256 MB cache, `temp_store=MEMORY`). Safe because the DB is
+  rebuildable from the CSV.
+- Indexes and `ANALYZE` run after bulk load; the raw pass commits every
+  1M rows to keep the WAL bounded.
 
 ### 2.4 `duapi` — REST API + SPA host
 
@@ -175,7 +202,7 @@ Startup:
    unreachable issuer is fatal.
 3. Opens SQLite pool (size = max(num_cpus, 4)) with `query_only=ON`,
    30 GB mmap hint, 64 MB cache per connection.
-4. Validates `metadata.schema_version == "2"`; bails with "rebuild with
+4. Validates `metadata.schema_version == "3"`; bails with "rebuild with
    newer dudb" otherwise.
 5. Caches user list into `OnceLock<Vec<String>>`.
 
@@ -474,9 +501,13 @@ Result is capped at `MAX_PAGE_SIZE` (default 2000).
 
 ### `GET /api/files`
 
-Lists regular files directly inside a folder. Unlike `/folders`, this reads
-the **live filesystem** — it does not touch the SQLite DB. Directories,
-symlinks, and non-regular entries are skipped. Path `/` is rejected.
+Lists regular files directly inside a folder. When the DB was built with
+`dudb --raw` (`metadata.has_files = 1`) the listing is served from the
+`files` table — same snapshot as `/folders`, no filesystem access, which
+is what production needs since the API host cannot see the scanned
+filesystem. Without the file index it falls back to a live `read_dir` of
+the API host's filesystem (dev mode). Directories, symlinks, and
+non-regular entries are excluded either way. Path `/` is rejected.
 
 Query params: `path` (required, not `/`), `users`, `age` (same semantics
 as `/folders`).
@@ -579,21 +610,23 @@ All `duapi` config is flag-or-env; CLI flags win.
 
 ```bash
 # 1) Build
-cd rs && cargo build --release
-cd ../browser && npm install && npm run build
+cargo build --release
+cd browser && npm install && npm run build
 
 # 2) Scan a filesystem
-./rs/target/release/duscan /data -o /tmp/data.csv
+./target/release/duscan /data -o /tmp/data.csv
 
 # 3) Aggregate by folder/user/age
-./rs/target/release/dusum /tmp/data.csv -o /tmp/data.sum.csv
+./target/release/dusum /tmp/data.csv -o /tmp/data.sum.csv
 
 # 4) Build the SQLite index
-./rs/target/release/dudb /tmp/data.sum.csv -o /tmp/data.db
+#    (--raw also ingests the per-file rows so /api/files is served from
+#     the DB — required when the API host cannot see the filesystem)
+./target/release/dudb /tmp/data.sum.csv --raw /tmp/data.csv -o /tmp/data.db
 
 # 5) Serve API + UI
 JWT_SECRET=<secret> ADMIN_GROUP=root,alice \
-  ./rs/target/release/duapi /tmp/data.db \
+  ./target/release/duapi /tmp/data.db \
   --static-dir ./browser/build --port 8000
 ```
 
@@ -602,14 +635,14 @@ Open `http://localhost:8000`, log in with an OS account.
 Optional analyst-friendly CSV:
 
 ```bash
-./rs/target/release/duhuman /tmp/data.csv -o /tmp/data.human.csv
+./target/release/duhuman /tmp/data.csv -o /tmp/data.human.csv
 ```
 
 Optional compression:
 
 ```bash
-./rs/target/release/duzip /tmp/data.csv -o /tmp/data.csv.zst
-./rs/target/release/duzip /tmp/data.csv.zst -o /tmp/data.csv
+./target/release/duzip /tmp/data.csv -o /tmp/data.csv.zst
+./target/release/duzip /tmp/data.csv.zst -o /tmp/data.csv
 ```
 
 ---
@@ -618,7 +651,8 @@ Optional compression:
 
 ### Docker
 
-Multi-stage build: compile `rs/` and `browser/` in a build image, copy
+Multi-stage build: compile the Rust workspace and `browser/` in a build
+image, copy
 `duapi`, `dudb`, and `browser/build/` into a slim runtime image.
 
 - Mount a volume that holds the input CSV and the built `*.db`.
@@ -655,21 +689,22 @@ UI is hosted on a separate origin, set `CORS_ORIGIN` explicitly.
 
 ```
 dutopia/
-  rs/                   Rust workspace (binaries + shared lib)
-    src/
-      lib.rs            re-exports util, auth, storage
-      auth.rs           JWT + per-OS credential verification
-      storage.rs        statvfs / Win32 disk info
-      util/             Row, CSV helpers, path utils, platform fns, logging
-      bin/
-        duscan/         scanner (main, worker, csv, merge, row)
-        dusum/          aggregator (main, stats, aggregate, output)
-        dudb/           SQLite ingester (main, schema, ingest)
-        duapi/          API server (main, handler, db, item, query, shutdown)
-        duzip/          CSV <-> zst (main, record, compress, decompress)
-        duhuman.rs      single-file humanizer
-        dumachine.rs    single-file reverse humanizer
-    Cargo.toml
+  src/                  Rust workspace (binaries + shared lib)
+    lib.rs              re-exports util, auth, storage, db, item, query, analytic
+    auth.rs             JWT + per-OS credential verification
+    db.rs               read-only SQLite pool + queries (list_children, list_files, has_files)
+    item.rs             live-filesystem listing — /api/files fallback without file index
+    storage.rs          statvfs / Win32 disk info
+    util/               Row, CSV helpers, age buckets, path utils, platform fns
+    bin/
+      duscan/           scanner (main, worker, csv, merge, row)
+      dusum/            aggregator (main, stats, aggregate, output)
+      dudb/             SQLite ingester (main, schema, ingest, ingest_raw)
+      duapi/            API server (main, handler, mcp, oidc, query, shutdown, ...)
+      duzip/            CSV <-> zst (main, record, compress, decompress)
+      duhuman.rs        single-file humanizer
+      dumachine.rs      single-file reverse humanizer
+  Cargo.toml
   browser/              SvelteKit SPA (static build)
   desktop/              Tauri 2 + SvelteKit desktop wrapper
   doc/                  this handbook
@@ -682,9 +717,12 @@ CI (GitHub Actions, Ubuntu): `cargo test -r` + `npm run build` on push to
 
 ## 10. Scale notes
 
-- DB size scales with **folder count x users x 3 ages**, not file count.
-  A realistic upper estimate (50 M folders x 3 users x 3 ages) keeps
-  `stats` in the tens of GB.
+- Without `--raw`, DB size scales with **folder count x users x 3 ages**,
+  not file count. A realistic upper estimate (50 M folders x 3 users x
+  3 ages) keeps `stats` in the tens of GB.
+- With `--raw`, the `files` table dominates at ~52 B per file (measured):
+  a 50 GB duscan CSV builds a ~23 GB DB (~0.46x the CSV), and 1 B files
+  cost ~52 GB of `files` alone. See `doc/file-index-plan.md`.
 - Hot query is one PK lookup on `paths.full_path` plus one clustered range
   scan on `stats` per child folder, capped by `MAX_PAGE_SIZE`.
   Sub-millisecond on warm cache.

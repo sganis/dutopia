@@ -116,10 +116,10 @@ block is a stringified copy for fallback parsers.
 
 The `<payload>` itself uses serde types already exported by the library:
 
-- `FolderOut { path, users: { <user>: { <age>: Age } } }` — `rs/src/db.rs`
-- `Age { count, size, disk, linked, atime, mtime }` — `rs/src/db.rs`
-- `FsItemOut { path, owner, size, accessed, modified }` — `rs/src/item.rs`
-- `UserTotal`, `FolderTotal`, `ColdFolder`, `Summary` — `rs/src/analytic.rs`
+- `FolderOut { path, users: { <user>: { <age>: Age } } }` — `src/db.rs`
+- `Age { count, size, disk, linked, atime, mtime }` — `src/db.rs`
+- `FsItemOut { path, owner, size, accessed, modified }` — `src/item.rs`
+- `UserTotal`, `FolderTotal`, `ColdFolder`, `Summary` — `src/analytic.rs`
 
 ## Usage
 
@@ -188,15 +188,15 @@ to browse the catalog and invoke tools interactively.
 
 ## File map
 
-| File                          | Role                                                  |
-|-------------------------------|-------------------------------------------------------|
-| `rs/src/bin/duapi/mcp.rs`     | JSON-RPC dispatch, tool registry, schemas, authz.     |
-| `rs/src/bin/duapi/main.rs`    | Mounts `/api/mcp` on the existing API router.         |
-| `rs/src/analytic.rs`          | Analytics SQL (`top_consumers`, `largest_folders`, `cold_data`, `summary`) plus unit tests. |
-| `rs/src/db.rs`                | `list_users`, `list_children`, fixture builder.       |
-| `rs/src/item.rs`              | `get_items` — live filesystem read for `list_files`.  |
-| `rs/src/auth.rs`              | `Claims` extractor (shared with REST).                |
-| `rs/src/bin/duapi/query.rs`   | `normalize_path`, `parse_users_csv`.                  |
+| File                       | Role                                                  |
+|----------------------------|-------------------------------------------------------|
+| `src/bin/duapi/mcp.rs`     | JSON-RPC dispatch, tool registry, schemas, authz.     |
+| `src/bin/duapi/main.rs`    | Mounts `/api/mcp` on the existing API router.         |
+| `src/analytic.rs`          | Analytics SQL (`top_consumers`, `largest_folders`, `cold_data`, `summary`) plus unit tests. |
+| `src/db.rs`                | `list_users`, `list_children`, `list_files`, `has_files`, fixture builder. |
+| `src/item.rs`              | `get_items` — live-filesystem fallback for `list_files` when the DB has no file index. |
+| `src/auth.rs`              | `Claims` extractor (shared with REST).                |
+| `src/bin/duapi/query.rs`   | `normalize_path`, `parse_users_csv`.                  |
 
 No new binary. No new top-level dependency — JSON-RPC is hand-rolled
 against `serde_json` (the spec is small and avoids fighting Axum's

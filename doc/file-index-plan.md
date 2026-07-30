@@ -35,12 +35,40 @@ listings finally match the aggregated bucket stats.
 
 ## Size & time estimates
 
+Pre-implementation guesses, kept for the record:
+
 - Row cost with filename-only storage (folder is an FK into `paths`):
   ~40–70 bytes in a clustered B-tree → **~60–90 GB total** for a 50 GB raw CSV
   (may come in under the CSV since full paths are deduplicated).
 - Ingest at 300–600k rows/s single-threaded → **30–90 min for ~1B rows**.
 - Operational cost to plan for: shipping a ~100 GB DB file to the API host each
   rebuild cycle (rsync or build in place).
+
+### Measured (2026-07-30, macOS home scan)
+
+Real run: 223 MB raw CSV, 1.35M rows (1.17M regular files, 152k folders,
+~166 B per CSV row). DB built with `--raw`, sizes from `dbstat`:
+
+| Component               | Size     | Per-row cost            |
+|-------------------------|----------|-------------------------|
+| `files`                 | 60.7 MB  | 51.9 B / file           |
+| `paths` + its 2 indexes | 35.1 MB  | 231 B / folder          |
+| `stats`                 | 5.9 MB   | 33 B / stats row        |
+| **DB total**            | 101.8 MB | **0.46× the raw CSV**   |
+
+Projection for a 50 GB raw CSV (~300M rows at the same path profile):
+**~23 GB total** — ~14 GB `files` + ~8 GB `paths` + ~1.3 GB `stats` — well
+under the 60–90 GB guessed above. Rule of thumb:
+
+```
+DB ≈ files × 52 B  +  folders × 232 B  +  stats_rows × 33 B
+```
+
+The ratio moves with the tree shape: longer paths fatten the CSV but not
+`files` (which stores names only), and denser folders (more files per
+folder) shrink the `paths` share — production filesystems usually land
+between 15 and 25 GB for a 50 GB CSV. At the 1B-file target scale the
+`files` table alone is ~52 GB.
 
 ## Design
 

@@ -61,7 +61,7 @@ Clone and build with Cargo:
 
 ```bash
 git clone https://github.com/sganis/dutopia.git
-cd dutopia/rs
+cd dutopia
 cargo build --release
 ```
 
@@ -107,6 +107,9 @@ Binaries are under `target/release/`:
 #  run on a host that resolves the same uid→username mapping as dusum)
 ./dudb home.sum.csv --raw home.csv -o home.db
 ```
+
+The file index costs ~52 bytes per file; the resulting DB is roughly
+half the size of the raw scan CSV (e.g. a 50 GB scan builds a ~23 GB DB).
 
 ### Compress / Decompress
 
