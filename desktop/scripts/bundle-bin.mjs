@@ -1,6 +1,6 @@
 // desktop/scripts/bundle-bin.mjs
 //
-// Build the three dutopia CLIs (duscan, dusum, dudb) from ../rs and copy
+// Build the three dutopia CLIs (duscan, dusum, dudb) from the repo root and copy
 // them into src-tauri/bin/ with the target-triple suffix that Tauri's
 // `externalBin` config expects (e.g. duscan-x86_64-pc-windows-msvc.exe).
 //
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
-const rsRoot = resolve(desktopRoot, "..", "rs");
+const rsRoot = resolve(desktopRoot, "..");
 const binOut = join(desktopRoot, "src-tauri", "bin");
 
 // Resolve the host target triple via rustc.

@@ -25,4 +25,4 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 # Dutopia library: storage enumeration + SQLite query helpers + filesystem item listing.
-dutopia = { path = "../../rs" }
+dutopia = { path = "../.." }
