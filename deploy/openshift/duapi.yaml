@@ -1,0 +1,95 @@
+# deploy/openshift/duapi.yaml
+# Apply with:  oc apply -f deploy/openshift/duapi.yaml
+# Edit the image reference and the Route host before applying.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: duapi-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: <your-on-prem-class>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: duapi
+  labels: { app: duapi }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: duapi }
+  template:
+    metadata:
+      labels: { app: duapi }
+    spec:
+      # No pod-level runAsUser: let the restricted-v2 SCC assign the UID.
+      containers:
+        - name: duapi
+          image: registry.corp.local/dutopia/duapi:4.0.26
+          args: ["/data/data.db"]
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - secretRef: { name: duapi-secret }
+            - configMapRef: { name: duapi-config }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            # db.rs opens max(num_cpus, 4) connections, each with a 64 MiB
+            # page cache, so keep the limit above ~4 x 64 MiB + overhead.
+            limits:   { cpu: "2",    memory: "1Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: duapi-data }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: duapi
+  labels: { app: duapi }
+spec:
+  selector: { app: duapi }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: duapi
+  labels: { app: duapi }
+spec:
+  host: dutopia.apps.ocp.corp.local
+  to: { kind: Service, name: duapi }
+  port: { targetPort: http }
+  # TLS terminates at the Route; duapi itself serves plain HTTP on 8080,
+  # so TLS_CERT/TLS_KEY stay unset in the container.
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

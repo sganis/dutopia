@@ -131,6 +131,17 @@ Open the **Svelte frontend** in your browser to explore results.
 
 ---
 
+## Deploy
+
+On-prem OpenShift: build on a Linux host, package into a thin image, push,
+apply. Full runbook in [deploy/README.md](deploy/README.md).
+
+```bash
+./deploy/build-linux.sh                                   # on the Linux host
+podman build -f deploy/Dockerfile -t <registry>/duapi:<v> .
+oc apply -f deploy/openshift/duapi.yaml
+```
+
 ## Contribute
 
 Fork and submit PRs:

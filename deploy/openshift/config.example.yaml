@@ -1,0 +1,25 @@
+# deploy/openshift/config.example.yaml
+# Non-secret settings. Copy, edit, apply.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: duapi-config
+data:
+  PORT: "8080"
+  STATIC_DIR: "/app/public"
+  DB_PATH: "/data/data.db"
+  ADMIN_GROUP: "dutopia-admins"
+  REQUEST_TIMEOUT_SECS: "30"
+  MAX_BODY_BYTES: "65536"
+  MAX_PAGE_SIZE: "2000"
+  RUST_LOG: "info"
+
+  # ---- OIDC / Keycloak ----
+  # Password login calls `su`, which cannot work in this container (no local
+  # accounts, unprivileged UID). On OpenShift, OIDC is the usable auth path.
+  OIDC_ISSUER: "https://keycloak.corp.local/realms/dutopia"
+  OIDC_CLIENT_ID: "duapi"
+  # Must match the Route host exactly, and be registered in Keycloak.
+  OIDC_REDIRECT_URI: "https://dutopia.apps.ocp.corp.local/api/auth/callback"
+  # Only when Keycloak uses a private/self-signed CA; mount the bundle too.
+  # OIDC_CA_CERT: "/etc/pki/corp/ca.pem"

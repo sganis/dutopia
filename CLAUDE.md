@@ -25,7 +25,7 @@ cargo clippy                 # Lint
 cd browser
 npm install                  # Install dependencies
 npm run dev                  # Dev server on port 5173
-npm run build                # Production build (outputs to build/)
+npm run build                # Production build (outputs to browser/public/)
 npm run check                # TypeScript/Svelte type checking
 ```
 

@@ -652,12 +652,25 @@ Optional compression:
 ### Docker
 
 Multi-stage build: compile the Rust workspace and `browser/` in a build
-image, copy
-`duapi`, `dudb`, and `browser/build/` into a slim runtime image.
+image, copy `duapi`, `dudb`, and `browser/public/` (adapter-static writes the
+SPA there, not to `browser/build/`) into a slim runtime image.
 
 - Mount a volume that holds the input CSV and the built `*.db`.
 - Run `dudb` in an init job (or build step), not at container start.
 - Main process is `duapi /data/data.db --static-dir /app/public`.
+
+### OpenShift (on-prem)
+
+The cluster cannot build, so compile on a Linux host and ship only artifacts.
+`deploy/` holds the scripts, Dockerfile and manifests; `deploy/README.md` is the
+step-by-step runbook. Three things differ from a plain Docker deployment:
+
+- Password login is unusable — `su` has no local accounts to check against and
+  the pod runs as an unprivileged random UID. Configure OIDC.
+- The base image's glibc must be at least the build host's, or the binary will
+  not start. Build on RHEL 9 for a UBI9 runtime.
+- Flatten the DB out of WAL (`PRAGMA journal_mode=DELETE; VACUUM;`) or keep
+  `/data` writable — a read-only open of a WAL database still creates a `-shm`.
 
 ### systemd
 
