@@ -62,14 +62,24 @@ uid -> username locally. Never in the cluster.
 ```bash
 ./target/release/duscan /path -o scan.csv
 ./target/release/dusum  scan.csv -o sum.csv
-./target/release/dudb   sum.csv --raw scan.csv -o data.db
-sqlite3 data.db 'PRAGMA journal_mode=DELETE; VACUUM;'
+./target/release/dudb   sum.csv --raw scan.csv -o /nfs/share/data.db --rebuild \
+                        --tmp-dir /local/scratch
+oc rollout restart deployment/duapi
 ```
 
 `--raw` is mandatory: the pod cannot see the scanned filesystem, so
-`/api/files` must come from the DB. The `journal_mode` line takes the DB out of
-WAL — a read-only open of a WAL database still needs to create a `-shm` file
-next to it.
+`/api/files` must come from the DB. `dudb` leaves the DB in rollback-journal
+(DELETE) mode — a read-only open of a WAL database would need to create a
+`-shm` file next to it — so no `VACUUM`/`journal_mode` step is needed (a
+`VACUUM` of a billion-row DB rewrites all of it).
+
+The `--raw` pass sorts the per-file rows on disk before inserting them, so its
+cost stays linear at a billion files. Point `--tmp-dir` (or `DUDB_TMPDIR`) at
+local disk with about a quarter of the raw CSV size free; `--sort-mem` (MiB,
+default 8192) sets the in-memory sort budget. The DB is built as
+`<output>.building` and renamed over `<output>` only when complete, so the old
+DB stays readable during the rebuild. Restart the pod afterwards so its
+connections reopen the new file.
 
 ## 6. Deploy
 

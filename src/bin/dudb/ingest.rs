@@ -92,8 +92,14 @@ pub fn ingest_csv<F: FnMut(u64)>(
         };
 
         for (lineno, rec) in rdr.records().enumerate() {
+            // Before any `continue`, so skipped rows never swallow a tick.
+            if progress_step > 0 && lineno > 0 && lineno % progress_step == 0 {
+                on_progress(lineno as u64);
+            }
             let rec = match rec {
                 Ok(r) => r,
+                // A persistent read error would otherwise repeat forever.
+                Err(e) if e.is_io_error() => return Err(e).context("reading CSV"),
                 Err(e) => {
                     eprintln!("warn: skipping malformed CSV row {}: {}", lineno + 2, e);
                     continue;
@@ -168,13 +174,10 @@ pub fn ingest_csv<F: FnMut(u64)>(
                     return Err(e.into());
                 }
             }
-
-            if progress_step > 0 && (lineno + 1) % progress_step == 0 {
-                on_progress(lineno as u64 + 1);
-            }
         }
     }
     tx.commit()?;
+    on_progress(total_data_lines as u64);
 
     backfill_missing_parents(conn, &path_cache)?;
     Ok((stats, path_cache))

@@ -4,10 +4,13 @@ use clap::{ColorChoice, Parser};
 use colored::Colorize;
 use dutopia::util::{parse_age_pair, print_about, AgeCfg};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+mod extsort;
 mod ingest;
 mod ingest_raw;
+mod raw_path;
 mod schema;
 
 #[derive(Parser, Debug)]
@@ -30,6 +33,13 @@ struct Args {
     /// values dusum ran with (defaults to 60,600)
     #[arg(long, value_parser = parse_age_pair, value_name = "YOUNG,OLD")]
     age: Option<(i64, i64)>,
+    /// Scratch directory for the --raw sort runs (local disk; needs roughly
+    /// 1/4 of the raw CSV size free). Defaults to the system temp dir
+    #[arg(long, value_name = "DIR", env = "DUDB_TMPDIR")]
+    tmp_dir: Option<PathBuf>,
+    /// Memory for the --raw sort in MiB (two buffers of half each)
+    #[arg(long, value_name = "MIB", default_value_t = 8192)]
+    sort_mem: usize,
     /// Overwrite an existing DB instead of failing
     #[arg(long)]
     rebuild: bool,
@@ -40,18 +50,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if !args.input.exists() {
-        eprintln!(
-            "{}",
-            format!("Error: input CSV not found: {}", args.input.display()).red()
-        );
-        std::process::exit(1);
+        fail(&format!("input CSV not found: {}", args.input.display()));
     }
     if let Some(raw) = args.raw.as_deref().filter(|r| !r.exists()) {
-        eprintln!(
-            "{}",
-            format!("Error: raw CSV not found: {}", raw.display()).red()
-        );
-        std::process::exit(1);
+        fail(&format!("raw CSV not found: {}", raw.display()));
     }
 
     let output = args.output.clone().unwrap_or_else(|| {
@@ -62,23 +64,21 @@ fn main() -> Result<()> {
             .unwrap_or("output");
         PathBuf::from(format!("{}.db", stem))
     });
-
-    if output.exists() {
-        if !args.rebuild {
-            eprintln!(
-                "{}",
-                format!(
-                    "Error: {} already exists. Use --rebuild to overwrite.",
-                    output.display()
-                )
-                .red()
-            );
-            std::process::exit(1);
-        }
-        remove_db_files(&output)?;
+    if output.exists() && !args.rebuild {
+        fail(&format!(
+            "{} already exists. Use --rebuild to overwrite.",
+            output.display()
+        ));
     }
 
-    let started = std::time::Instant::now();
+    // Build next to the output and rename at the end: a reader of the
+    // current DB (duapi on the share) keeps working until the new one is
+    // complete, and a failed build leaves the old DB untouched.
+    let building = sibling(&output, ".building");
+    remove_db_files(&building)?;
+
+    let started = Instant::now();
+    let mut phase = Instant::now();
 
     print!("Counting lines... ");
     std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -87,17 +87,15 @@ fn main() -> Result<()> {
     println!("done");
     println!("Total lines  : {}", total_lines);
 
-    let mut conn = Connection::open(&output)
-        .with_context(|| format!("opening {}", output.display()))?;
+    let mut conn = Connection::open(&building)
+        .with_context(|| format!("opening {}", building.display()))?;
     schema::apply_ingest_pragmas(&conn)?;
     schema::create_tables(&conn)?;
 
     println!("Loading CSV into SQLite...");
     let (stats, path_cache) =
-        ingest::ingest_csv(&mut conn, &args.input, data_lines, |processed| {
-            let pct = ((processed as f64 / data_lines.max(1) as f64) * 100.0).round() as u32;
-            println!("{}%", pct.min(100));
-        })?;
+        ingest::ingest_csv(&mut conn, &args.input, data_lines, percent(data_lines as u64))?;
+    done(&mut phase);
 
     let mut file_stats = None;
     if let Some(raw) = &args.raw {
@@ -106,36 +104,59 @@ fn main() -> Result<()> {
         std::io::Write::flush(&mut std::io::stdout()).ok();
         let raw_lines = ingest::count_lines(raw)?.saturating_sub(1);
         println!("done ({} lines)", raw_lines);
-        println!("Loading raw CSV into SQLite (files)...");
-        let fs = ingest_raw::ingest_raw_csv(&conn, raw, &path_cache, age_cfg, raw_lines, |p| {
-            let pct = ((p as f64 / raw_lines.max(1) as f64) * 100.0).round() as u32;
-            println!("{}%", pct.min(100));
-        })?;
-        let raw_mtime = file_mtime(raw);
+
+        let opts = ingest_raw::SortOpts {
+            tmp_dir: args.tmp_dir.clone().unwrap_or_else(std::env::temp_dir),
+            run_bytes: (args.sort_mem.max(64) << 20) / 2,
+        };
+        println!("Sorting raw CSV (1/2) in {} ...", opts.tmp_dir.display());
+        let sorted = ingest_raw::sort_raw_csv(
+            &conn,
+            raw,
+            &path_cache,
+            age_cfg,
+            &opts,
+            raw_lines,
+            percent(raw_lines as u64),
+        )?;
+        drop(path_cache);
+        println!(
+            "Sorted {} rows into {} runs ({:.1} GiB in {})",
+            sorted.rows(),
+            sorted.run_count(),
+            sorted.disk_bytes() as f64 / (1u64 << 30) as f64,
+            sorted.dir().display()
+        );
+        done(&mut phase);
+
+        println!("Writing files table (2/2)...");
+        let total = sorted.rows();
+        let fs = ingest_raw::load_sorted_runs(&conn, sorted, percent(total))?;
         schema::write_files_metadata(
             &conn,
             &raw.to_string_lossy(),
-            raw_mtime,
+            file_mtime(raw),
             fs.files_inserted,
             age_cfg,
         )?;
+        done(&mut phase);
         file_stats = Some(fs);
     }
 
     println!("Building indexes...");
     schema::create_indexes(&conn)?;
-    println!("Running ANALYZE...");
-    conn.execute_batch("ANALYZE;")?;
-
-    let source_mtime = file_mtime(&args.input);
     schema::write_metadata(
         &conn,
         &args.input.to_string_lossy(),
-        source_mtime,
+        file_mtime(&args.input),
         stats.rows_inserted,
     )?;
+    println!("Running ANALYZE...");
+    schema::finalize(&conn)?;
+    drop(conn);
+    replace_db(&building, &output)?;
+    done(&mut phase);
 
-    let elapsed = started.elapsed();
     println!("Output       : {}", output.display());
     println!("Stats rows   : {}", stats.rows_inserted);
     println!("Paths        : {}", stats.paths_inserted);
@@ -152,11 +173,33 @@ fn main() -> Result<()> {
             println!("Duplicates   : {} (skipped)", fs.duplicates);
         }
     }
-    println!("Elapsed time : {:.2} seconds", elapsed.as_secs_f64());
+    println!("Elapsed time : {:.2} seconds", started.elapsed().as_secs_f64());
     Ok(())
 }
 
-fn file_mtime(path: &std::path::Path) -> i64 {
+fn fail(msg: &str) -> ! {
+    eprintln!("{}", format!("Error: {}", msg).red());
+    std::process::exit(1);
+}
+
+/// Progress printer: one line per whole percent, never repeated.
+fn percent(total: u64) -> impl FnMut(u64) {
+    let mut last = None;
+    move |n| {
+        let pct = (n as f64 / total.max(1) as f64 * 100.0).round().min(100.0) as u32;
+        if last != Some(pct) {
+            println!("{}%", pct);
+            last = Some(pct);
+        }
+    }
+}
+
+fn done(phase: &mut Instant) {
+    println!("  ... {:.1}s", phase.elapsed().as_secs_f64());
+    *phase = Instant::now();
+}
+
+fn file_mtime(path: &Path) -> i64 {
     std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
@@ -165,15 +208,26 @@ fn file_mtime(path: &std::path::Path) -> i64 {
         .unwrap_or(0)
 }
 
-fn remove_db_files(db: &PathBuf) -> Result<()> {
+fn sibling(db: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{}", db.display(), suffix))
+}
+
+fn remove_db_files(db: &Path) -> Result<()> {
     let _ = std::fs::remove_file(db);
-    for sibling in [
-        format!("{}-wal", db.display()),
-        format!("{}-shm", db.display()),
-    ] {
-        let _ = std::fs::remove_file(&sibling);
+    for s in ["-wal", "-shm", "-journal"] {
+        let _ = std::fs::remove_file(sibling(db, s));
     }
     Ok(())
+}
+
+/// Swap the finished build into place. Sidecars of the old DB go first: a
+/// stale `-journal` next to the new file would be replayed into it.
+fn replace_db(building: &Path, output: &Path) -> Result<()> {
+    for s in ["-wal", "-shm", "-journal"] {
+        let _ = std::fs::remove_file(sibling(output, s));
+    }
+    std::fs::rename(building, output)
+        .with_context(|| format!("renaming {} to {}", building.display(), output.display()))
 }
 
 #[cfg(test)]
@@ -185,5 +239,19 @@ mod tests {
         let p = PathBuf::from("does_not_exist_dudb_test.db");
         // Should not error even if files don't exist.
         remove_db_files(&p).unwrap();
+    }
+
+    #[test]
+    fn replace_db_swaps_file_and_drops_old_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("x.db");
+        let building = sibling(&out, ".building");
+        std::fs::write(&out, b"old").unwrap();
+        std::fs::write(sibling(&out, "-journal"), b"stale").unwrap();
+        std::fs::write(&building, b"new").unwrap();
+        replace_db(&building, &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        assert!(!building.exists());
+        assert!(!sibling(&out, "-journal").exists());
     }
 }

@@ -8,18 +8,36 @@ use rusqlite::{params, Connection};
 /// from `dusum` with a synthetic `full_path = ""` root (v1 was Unix-canonical).
 pub const SCHEMA_VERSION: &str = "3";
 
-/// Pragmas tuned for bulk ingest. `synchronous=OFF` is safe here because the
-/// DB is rebuildable from the source CSV. `page_size` must come first: it only
-/// takes effect before the database file is initialized, and the larger pages
-/// cut B-tree depth for the billion-row `files` table.
+/// Pragmas tuned for bulk ingest into a scratch file that is renamed into
+/// place only after a successful build, so durability is irrelevant:
+/// `synchronous=OFF`, and an in-memory rollback journal instead of WAL. Every
+/// page written during the build is new, and new pages are never journaled,
+/// so the journal stays tiny; WAL would instead copy the whole DB through the
+/// `-wal` file and back again on checkpoint. `page_size` must come first: it
+/// only takes effect before the database file is initialized.
 pub fn apply_ingest_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA page_size    = 8192;
-         PRAGMA journal_mode = WAL;
+         PRAGMA journal_mode = MEMORY;
          PRAGMA synchronous  = OFF;
+         PRAGMA locking_mode = EXCLUSIVE;
          PRAGMA temp_store   = MEMORY;
          PRAGMA cache_size   = -262144;
          PRAGMA foreign_keys = OFF;",
+    )?;
+    Ok(())
+}
+
+/// Planner statistics plus the on-disk mode duapi expects. `analysis_limit`
+/// bounds ANALYZE to a sample per index: a full ANALYZE walks every row of
+/// every index (a billion-row `files` scan) for statistics the duapi queries
+/// don't need precisely. DELETE journal mode lets a read-only open work
+/// without creating a `-shm` file next to the DB (e.g. on an NFS share).
+pub fn finalize(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA analysis_limit = 1000;
+         ANALYZE;
+         PRAGMA journal_mode = DELETE;",
     )?;
     Ok(())
 }
@@ -208,6 +226,25 @@ mod tests {
         assert_eq!(get("files_row_count"), "1000");
         assert_eq!(get("age_young_days"), "60");
         assert_eq!(get("age_old_days"), "600");
+    }
+
+    #[test]
+    fn finalize_leaves_rollback_journal_and_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.db");
+        let c = Connection::open(&p).unwrap();
+        apply_ingest_pragmas(&c).unwrap();
+        create_tables(&c).unwrap();
+        c.execute("INSERT INTO paths(full_path, parent_id) VALUES('/', NULL)", [])
+            .unwrap();
+        create_indexes(&c).unwrap();
+        finalize(&c).unwrap();
+        let mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, "delete");
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM sqlite_stat1", [], |r| r.get(0))
+            .unwrap();
+        assert!(n > 0);
     }
 
     #[test]
