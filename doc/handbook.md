@@ -102,8 +102,11 @@ dudb <input> [OPTIONS]
   -o, --output PATH        default: <stem>.db
       --raw FILE           raw duscan CSV: also pack each folder's files so
                            /api/files is served from the DB
-      --max-files N        keep only the N largest files per folder, owner
-                           and age bucket (default: 1000; 0 keeps all)
+      --max-files N        list only the N largest files per folder, owner
+                           and age bucket (default: 100; 0 = no limit)
+      --min-file-size SIZE list only files of at least SIZE (default: 1M);
+                           smaller ones only count in the folder totals
+      --no-files           folders only: duapi lists no files, never the disk
       --age YOUNG,OLD      age cutoffs in days for per-file rows; must
                            match what dusum ran with (default: 60,600)
       --rebuild            overwrite existing DB
@@ -738,7 +741,7 @@ CI (GitHub Actions, Ubuntu): `cargo test -r` + `npm run build` on push to
   3 ages) keeps `stats` in the tens of GB.
 - With `--raw`, `folder_files` costs ~18 B per file packed (v3's
   one-row-per-file table cost ~57 B: 1 B files took ~64 GB). The default
-  `--max-files 1000` drops the small-file tail of huge folders on top.
+  The defaults (100 largest, >= 1 MB) list ~1% of files yet ~80% of bytes.
 - Hot query is one PK lookup on `paths.full_path` plus one clustered range
   scan on `stats` per child folder, capped by `MAX_PAGE_SIZE`.
   Sub-millisecond on warm cache.

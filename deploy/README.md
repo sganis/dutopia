@@ -74,8 +74,9 @@ oc rollout restart deployment/duapi
 `VACUUM` of a billion-row DB rewrites all of it).
 
 The `--raw` pass sorts the per-file rows on disk, then packs each folder's
-files into one compressed row (only the 1000 largest per folder, owner and age;
-`--max-files` changes it, 0 keeps all), so its cost stays linear at a billion
+files into one compressed row (totals of all of them, but only the 100 largest
+of at least 1 MB per folder, owner and age are listed; see `--max-files` and
+`--min-file-size`), so its cost stays linear at a billion
 files. Point `--tmp-dir` (or `DUDB_TMPDIR`) at
 local disk with about a quarter of the raw CSV size free; `--sort-mem` (MiB,
 default 8192) sets the in-memory sort budget. The DB is built as
