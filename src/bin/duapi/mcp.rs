@@ -134,7 +134,7 @@ fn tools_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "list_files",
-            "description": "Files directly inside `path` from the scan snapshot DB (falls back to a live filesystem read when the DB has no file index).",
+            "description": "Largest files directly inside `path` from the scan snapshot DB, plus per-owner totals (count, size) of all its files including those not listed (falls back to a live filesystem read when the DB has no file index).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -355,10 +355,15 @@ async fn tool_list_files(claims: &Claims, args: Value) -> Result<Value, String> 
     }
     let users_t = users.clone();
     let path_t = path.clone();
-    // Snapshot DB when `dudb --raw` populated it; live filesystem otherwise
-    // (dev setups / folder-only DBs — mirrors handler.rs::get_files_handler).
+    // Nothing for `dudb --no-files`; snapshot DB when `dudb --raw` populated
+    // it; live filesystem otherwise (dev setups / folder-only DBs — mirrors
+    // handler.rs::get_files_handler).
+    if crate::files_disabled() {
+        return serde_json::to_value(item::FilesOut::default()).map_err(|e| format!("serialize: {e}"));
+    }
     if crate::files_indexed() {
         let pool = get_db().clone();
+        let limit = crate::files_limit(limit);
         let items = tokio::task::spawn_blocking(move || {
             db::list_files(&pool, &path_t, &users_t, age, limit)
         })
@@ -367,14 +372,11 @@ async fn tool_list_files(claims: &Claims, args: Value) -> Result<Value, String> 
         .map_err(|e| format!("query: {e}"))?;
         return serde_json::to_value(items).map_err(|e| format!("serialize: {e}"));
     }
-    let mut items = tokio::task::spawn_blocking(move || item::get_items(path_t, &users_t, age))
+    let items = tokio::task::spawn_blocking(move || item::get_items(path_t, &users_t, age))
         .await
         .map_err(|e| format!("join: {e}"))?
         .map_err(|e| format!("get_items: {e}"))?;
-    if items.len() > limit {
-        items.truncate(limit);
-    }
-    serde_json::to_value(items).map_err(|e| format!("serialize: {e}"))
+    serde_json::to_value(item::FilesOut::from_all(items, limit)).map_err(|e| format!("serialize: {e}"))
 }
 
 // ---------- Analytics wrappers (admin only for cross-user aggregates) ----------
@@ -543,10 +545,11 @@ mod tests {
         init_db_once();
         let args = json!({ "path": "/docs" });
         let v = tool_list_files(&admin(), args).await.unwrap();
-        let arr = v.as_array().unwrap();
+        let arr = v["files"].as_array().unwrap();
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0]["path"], "/docs/a.txt");
         assert_eq!(arr[2]["owner"], "bob");
+        assert_eq!(v["totals"]["alice"]["count"], 7);
     }
 
     #[tokio::test]
@@ -555,7 +558,7 @@ mod tests {
         init_db_once();
         let args = json!({ "path": "/docs", "limit": 1 });
         let v = tool_list_files(&admin(), args).await.unwrap();
-        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v["files"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

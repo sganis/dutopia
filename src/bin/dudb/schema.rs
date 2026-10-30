@@ -3,10 +3,12 @@ use anyhow::Result;
 use dutopia::util::AgeCfg;
 use rusqlite::{params, Connection};
 
-/// `3` adds the per-file `files` table (populated from the raw duscan CSV via
-/// `--raw`) plus the `has_files` metadata flag. `2` stored paths byte-for-byte
-/// from `dusum` with a synthetic `full_path = ""` root (v1 was Unix-canonical).
-pub const SCHEMA_VERSION: &str = "3";
+/// `4` replaces v3's one-row-per-file `files` table with `folder_files`: one
+/// `filepack` blob per folder holding its file totals and a short list of
+/// its largest files (v3 grew a 1.1B-file DB from 8 GB to 72 GB). `3` added the per-file index (`--raw`) and the
+/// `has_files` flag. `2` stored paths byte-for-byte from `dusum` with a
+/// synthetic `full_path = ""` root (v1 was Unix-canonical).
+pub const SCHEMA_VERSION: &str = "4";
 
 /// Pragmas tuned for bulk ingest into a scratch file that is renamed into
 /// place only after a successful build, so durability is irrelevant:
@@ -69,19 +71,13 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
          );
-         -- Per-file rows from the raw duscan CSV (regular files only).
-         -- Clustered on (folder_id, name): one folder's files live in
-         -- contiguous pages, so listing a folder needs no secondary index.
-         CREATE TABLE IF NOT EXISTS files (
-            folder_id INTEGER NOT NULL,
-            name      TEXT    NOT NULL,
-            user_id   INTEGER NOT NULL,
-            age       INTEGER NOT NULL,
-            size      INTEGER NOT NULL,
-            atime     INTEGER NOT NULL,
-            mtime     INTEGER NOT NULL,
-            PRIMARY KEY (folder_id, name)
-         ) WITHOUT ROWID;",
+         -- Regular files directly inside each folder (from the raw duscan
+         -- CSV): totals per (user, age) plus the largest few, packed by
+         -- dutopia::filepack. Listing a folder is one rowid lookup.
+         CREATE TABLE IF NOT EXISTS folder_files (
+            folder_id INTEGER PRIMARY KEY,
+            data      BLOB    NOT NULL
+         );",
     )?;
     Ok(())
 }
@@ -118,25 +114,44 @@ pub fn write_metadata(
     Ok(())
 }
 
+/// What a `--raw` ingest stored, recorded in `metadata`.
+pub struct FilesMeta<'a> {
+    pub raw_csv: &'a str,
+    pub raw_mtime: i64,
+    /// Distinct regular files, all counted in the folder totals.
+    pub total: u64,
+    /// Files in the per-folder lists.
+    pub listed: u64,
+    /// `--max-files`; 0 = no limit.
+    pub cap: usize,
+    /// `--min-file-size` in bytes.
+    pub min_size: u64,
+    pub age_cfg: AgeCfg,
+}
+
 /// Recorded after a successful `--raw` ingest. `has_files = 1` is what makes
-/// duapi serve /api/files from the DB instead of the live filesystem; the age
-/// cutoffs document which thresholds froze the per-file `age` column.
-pub fn write_files_metadata(
-    conn: &Connection,
-    raw_csv: &str,
-    raw_mtime: i64,
-    file_count: u64,
-    age_cfg: AgeCfg,
-) -> Result<()> {
-    let pairs: [(&str, String); 6] = [
+/// duapi serve /api/files from the DB instead of the live filesystem;
+/// `files_cap` bounds its page size so a listing is always the exact top-N;
+/// the age cutoffs document which thresholds froze the per-file `age`.
+pub fn write_files_metadata(conn: &Connection, m: &FilesMeta) -> Result<()> {
+    let pairs: [(&str, String); 9] = [
         ("has_files", "1".to_string()),
-        ("files_source_csv", raw_csv.to_string()),
-        ("files_source_csv_mtime", raw_mtime.to_string()),
-        ("files_row_count", file_count.to_string()),
-        ("age_young_days", age_cfg.young.to_string()),
-        ("age_old_days", age_cfg.old.to_string()),
+        ("files_source_csv", m.raw_csv.to_string()),
+        ("files_source_csv_mtime", m.raw_mtime.to_string()),
+        ("files_total", m.total.to_string()),
+        ("files_listed", m.listed.to_string()),
+        ("files_cap", m.cap.to_string()),
+        ("files_min_size", m.min_size.to_string()),
+        ("age_young_days", m.age_cfg.young.to_string()),
+        ("age_old_days", m.age_cfg.old.to_string()),
     ];
     upsert_pairs(conn, &pairs)
+}
+
+/// `dudb --no-files`: a folders-only DB on purpose. duapi then lists no
+/// files instead of falling back to reading the live filesystem.
+pub fn write_no_files_metadata(conn: &Connection) -> Result<()> {
+    upsert_pairs(conn, &[("no_files", "1".to_string())])
 }
 
 fn upsert_pairs(conn: &Connection, pairs: &[(&str, String)]) -> Result<()> {
@@ -175,7 +190,7 @@ mod tests {
         assert!(names.contains(&"paths".to_string()));
         assert!(names.contains(&"stats".to_string()));
         assert!(names.contains(&"metadata".to_string()));
-        assert!(names.contains(&"files".to_string()));
+        assert!(names.contains(&"folder_files".to_string()));
     }
 
     #[test]
@@ -212,7 +227,16 @@ mod tests {
     fn files_metadata_marks_has_files() {
         let c = fresh();
         write_metadata(&c, "x.csv", 1234, 99).unwrap();
-        write_files_metadata(&c, "raw.csv", 5678, 1000, AgeCfg::default()).unwrap();
+        let m = FilesMeta {
+            raw_csv: "raw.csv",
+            raw_mtime: 5678,
+            total: 1500,
+            listed: 40,
+            cap: 100,
+            min_size: 1_000_000,
+            age_cfg: AgeCfg::default(),
+        };
+        write_files_metadata(&c, &m).unwrap();
         let get = |k: &str| -> String {
             c.query_row(
                 "SELECT value FROM metadata WHERE key=?1",
@@ -223,9 +247,25 @@ mod tests {
         };
         assert_eq!(get("has_files"), "1");
         assert_eq!(get("files_source_csv"), "raw.csv");
-        assert_eq!(get("files_row_count"), "1000");
+        assert_eq!(get("files_total"), "1500");
+        assert_eq!(get("files_listed"), "40");
+        assert_eq!(get("files_cap"), "100");
+        assert_eq!(get("files_min_size"), "1000000");
         assert_eq!(get("age_young_days"), "60");
         assert_eq!(get("age_old_days"), "600");
+    }
+
+    #[test]
+    fn no_files_metadata_marks_db() {
+        let c = fresh();
+        write_metadata(&c, "x.csv", 1234, 99).unwrap();
+        write_no_files_metadata(&c).unwrap();
+        let get = |k: &str| -> String {
+            c.query_row("SELECT value FROM metadata WHERE key=?1", params![k], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(get("no_files"), "1");
+        assert_eq!(get("has_files"), "0");
     }
 
     #[test]

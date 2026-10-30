@@ -100,14 +100,16 @@ database consumed by `duapi`. Never run by the API server.
 dudb <input> [OPTIONS]
 
   -o, --output PATH        default: <stem>.db
-      --raw FILE           raw duscan CSV: also ingest per-file rows so
+      --raw FILE           raw duscan CSV: also pack each folder's files so
                            /api/files is served from the DB
+      --max-files N        keep only the N largest files per folder, owner
+                           and age bucket (default: 1000; 0 keeps all)
       --age YOUNG,OLD      age cutoffs in days for per-file rows; must
                            match what dusum ran with (default: 60,600)
       --rebuild            overwrite existing DB
 ```
 
-SQLite schema (v3):
+SQLite schema (v4):
 
 ```sql
 CREATE TABLE users (
@@ -140,17 +142,12 @@ CREATE TABLE metadata (
   value TEXT NOT NULL
 );
 
--- populated only with --raw: one row per regular file
-CREATE TABLE files (
-  folder_id INTEGER NOT NULL,   -- FK -> paths.id (parent folder)
-  name      TEXT    NOT NULL,   -- filename only, not full path
-  user_id   INTEGER NOT NULL,   -- FK -> users.id
-  age       INTEGER NOT NULL,   -- bucket 0/1/2, frozen at ingest
-  size      INTEGER NOT NULL,
-  atime     INTEGER NOT NULL,
-  mtime     INTEGER NOT NULL,
-  PRIMARY KEY (folder_id, name)
-) WITHOUT ROWID;
+-- populated only with --raw: one row per folder that has regular files
+CREATE TABLE folder_files (
+  folder_id INTEGER PRIMARY KEY,  -- FK -> paths.id
+  data      BLOB    NOT NULL      -- zstd filepack: name, user_id, age,
+                                  -- size, atime, mtime per file, largest first
+);
 ```
 
 Design notes:
@@ -163,17 +160,22 @@ Design notes:
   every platform root, so `parent_id = <synthetic root>.id` lists all
   drives / `/`.
 - `stats` is `WITHOUT ROWID` — its PK is its natural clustering.
-- `files` is `WITHOUT ROWID`, clustered on `(folder_id, name)`: one
-  folder's files live in contiguous pages, so a listing is a single
-  B-tree range scan with no secondary index. `metadata.has_files = 1`
-  records that a `--raw` ingest completed.
+- `folder_files` holds each folder's files as one compressed blob
+  (`src/filepack.rs`, columnar + zstd), so a listing is one rowid lookup
+  plus a decompress. `metadata.has_files = 1` records that a `--raw`
+  ingest completed.
+- Only the `--max-files` largest files per (folder, owner, age) are kept
+  (`metadata.files_cap`; `files_total` counts all of them). The cap is
+  per owner and age, not per folder, so every filtered listing up to the
+  cap is exact; `duapi` clamps `/api/files` pages to it.
 - Per-file `age` is frozen at ingest time with the `--age` cutoffs, and
   uid→username resolves against the ingest host's account database — run
   `dudb` in the same identity domain as `dusum` (normally the same host,
   same pipeline run).
-- Measured cost of the file index: ~52 B per file row; the whole DB comes
-  to ~0.46× the raw duscan CSV (see `doc/file-index-plan.md`).
-- `metadata.schema_version = "3"` is verified at `duapi` startup.
+- Measured cost of the file index: ~18 B per file packed (v3 stored one
+  row per file at ~57 B). On a 2.1 M-file scan: 119 MB of v3 rows vs
+  39 MB packed, 34 MB with the default cap.
+- `metadata.schema_version = "4"` is verified at `duapi` startup.
 - Ingest pragmas are tuned for bulk insert (`synchronous=OFF`, WAL, 8 KB
   pages, 256 MB cache, `temp_store=MEMORY`). Safe because the DB is
   rebuildable from the CSV.
@@ -202,7 +204,7 @@ Startup:
    unreachable issuer is fatal.
 3. Opens SQLite pool (size = max(num_cpus, 4)) with `query_only=ON`,
    30 GB mmap hint, 64 MB cache per connection.
-4. Validates `metadata.schema_version == "3"`; bails with "rebuild with
+4. Validates `metadata.schema_version == "4"`; bails with "rebuild with
    newer dudb" otherwise.
 5. Caches user list into `OnceLock<Vec<String>>`.
 
@@ -503,7 +505,8 @@ Result is capped at `MAX_PAGE_SIZE` (default 2000).
 
 Lists regular files directly inside a folder. When the DB was built with
 `dudb --raw` (`metadata.has_files = 1`) the listing is served from the
-`files` table — same snapshot as `/folders`, no filesystem access, which
+`folder_files` table, largest first — same snapshot as `/folders`, no
+filesystem access, which
 is what production needs since the API host cannot see the scanned
 filesystem. Without the file index it falls back to a live `read_dir` of
 the API host's filesystem (dev mode). Directories, symlinks, and
@@ -513,7 +516,7 @@ Query params: `path` (required, not `/`), `users`, `age` (same semantics
 as `/folders`).
 
 Response: array of `{ path, owner, size, accessed, modified }`, capped at
-`MAX_PAGE_SIZE`.
+`MAX_PAGE_SIZE` and, when served from the DB, at `metadata.files_cap`.
 
 Non-admins must pass exactly their own username in `users`.
 
@@ -733,9 +736,9 @@ CI (GitHub Actions, Ubuntu): `cargo test -r` + `npm run build` on push to
 - Without `--raw`, DB size scales with **folder count x users x 3 ages**,
   not file count. A realistic upper estimate (50 M folders x 3 users x
   3 ages) keeps `stats` in the tens of GB.
-- With `--raw`, the `files` table dominates at ~52 B per file (measured):
-  a 50 GB duscan CSV builds a ~23 GB DB (~0.46x the CSV), and 1 B files
-  cost ~52 GB of `files` alone. See `doc/file-index-plan.md`.
+- With `--raw`, `folder_files` costs ~18 B per file packed (v3's
+  one-row-per-file table cost ~57 B: 1 B files took ~64 GB). The default
+  `--max-files 1000` drops the small-file tail of huge folders on top.
 - Hot query is one PK lookup on `paths.full_path` plus one clustered range
   scan on `stats` per child folder, capped by `MAX_PAGE_SIZE`.
   Sub-millisecond on warm cache.

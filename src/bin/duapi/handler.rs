@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use dutopia::auth::{keys, AuthBody, AuthError, AuthPayload, Claims};
 
 use dutopia::db;
-use dutopia::item::get_items;
+use dutopia::item::{get_items, FilesOut};
 use crate::email;
 use crate::query::{parse_users_csv, FilesQuery, FolderQuery};
 use crate::{get_db, get_users};
@@ -196,16 +196,20 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
     let age = q.age;
     let cap = crate::query::max_page_size();
 
-    // Preferred path: per-file rows ingested by `dudb --raw`. In production
+    // `dudb --no-files`: a folders-only DB on purpose; never read the disk.
+    if crate::files_disabled() {
+        return Json(FilesOut::default()).into_response();
+    }
+
+    // Preferred path: the file index packed by `dudb --raw`. In production
     // the API host has no access to the scanned filesystem, so the live
     // read_dir below only serves dev setups / folder-only DBs.
     if crate::files_indexed() {
+        let cap = crate::files_limit(cap);
         let pool = get_db().clone();
         let folder_for_task = folder.clone();
-        // Ask for one row past the cap so truncation is detectable without
-        // ever materializing an oversized folder in memory.
         let fut = tokio::task::spawn_blocking(move || {
-            db::list_files(&pool, &folder_for_task, &requested, age, cap + 1)
+            db::list_files(&pool, &folder_for_task, &requested, age, cap)
         });
         return match fut.await {
             Err(join_err) => {
@@ -224,13 +228,9 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 )
                     .into_response()
             }
-            Ok(Ok(mut items)) => {
-                if items.len() > cap {
-                    tracing::warn!(path = %folder, cap, "/api/files truncated");
-                    items.truncate(cap);
-                }
-                tracing::info!(items = items.len(), "200 OK /api/files");
-                Json(items).into_response()
+            Ok(Ok(out)) => {
+                tracing::info!(items = out.files.len(), "200 OK /api/files");
+                Json(out).into_response()
             }
         };
     }
@@ -258,13 +258,13 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
                 (StatusCode::BAD_REQUEST, e.to_string()).into_response()
             }
         }
-        Ok(Ok(mut items)) => {
+        Ok(Ok(items)) => {
             if items.len() > cap {
                 tracing::warn!(total = items.len(), cap, "/api/files truncated");
-                items.truncate(cap);
             }
-            tracing::info!(items = items.len(), "200 OK /api/files");
-            Json(items).into_response()
+            let out = FilesOut::from_all(items, cap);
+            tracing::info!(items = out.files.len(), "200 OK /api/files");
+            Json(out).into_response()
         }
     }
 }

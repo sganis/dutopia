@@ -1,6 +1,7 @@
 // rs/src/item.rs
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -15,6 +16,50 @@ pub struct FsItemOut {
     pub size: u64,
     pub accessed: i64,
     pub modified: i64,
+}
+
+/// One owner's regular files directly in a folder, listed or not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileTotals {
+    pub count: u64,
+    pub size: u64,
+    pub accessed: i64,
+    pub modified: i64,
+}
+
+impl FileTotals {
+    pub fn add(&mut self, count: u64, size: u64, accessed: i64, modified: i64) {
+        if self.count == 0 {
+            (self.accessed, self.modified) = (accessed, modified);
+        }
+        self.count += count;
+        self.size = self.size.saturating_add(size);
+        self.accessed = self.accessed.max(accessed);
+        self.modified = self.modified.max(modified);
+    }
+}
+
+/// `/api/files` response: the largest files of a folder, plus totals of all
+/// its files (matching the same filters) per owner, so a short list still
+/// tells how much it leaves out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FilesOut {
+    pub files: Vec<FsItemOut>,
+    pub totals: BTreeMap<String, FileTotals>,
+}
+
+impl FilesOut {
+    /// From a complete listing (live filesystem): totals over every item,
+    /// then the `limit` largest.
+    pub fn from_all(mut items: Vec<FsItemOut>, limit: usize) -> Self {
+        let mut totals: BTreeMap<String, FileTotals> = BTreeMap::new();
+        for i in &items {
+            totals.entry(i.owner.clone()).or_default().add(1, i.size, i.accessed, i.modified);
+        }
+        items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        items.truncate(limit);
+        Self { files: items, totals }
+    }
 }
 
 #[cfg(unix)]
@@ -233,6 +278,25 @@ pub fn get_items<P: AsRef<std::path::Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(path: &str, owner: &str, size: u64, modified: i64) -> FsItemOut {
+        FsItemOut { path: path.into(), owner: owner.into(), size, accessed: 0, modified }
+    }
+
+    #[test]
+    fn files_out_totals_every_item_and_keeps_the_largest() {
+        let items = vec![
+            item("/d/a", "alice", 10, 5),
+            item("/d/b", "alice", 30, 9),
+            item("/d/c", "bob", 20, 1),
+        ];
+        let out = FilesOut::from_all(items, 2);
+        let paths: Vec<&str> = out.files.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["/d/b", "/d/c"]);
+        let alice = out.totals["alice"];
+        assert_eq!((alice.count, alice.size, alice.modified), (2, 40, 9));
+        assert_eq!(out.totals["bob"].count, 1);
+    }
 
     #[cfg(unix)]
     #[test]

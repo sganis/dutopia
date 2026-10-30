@@ -38,6 +38,10 @@ static USERS: OnceLock<Vec<String>> = OnceLock::new();
 /// Whether the DB carries per-file rows (`dudb --raw`); probed once at
 /// startup. When false, /api/files falls back to the live filesystem.
 static FILES_INDEXED: OnceLock<bool> = OnceLock::new();
+/// `dudb --max-files` of the file index (0 = uncapped); probed at startup.
+static FILES_CAP: OnceLock<usize> = OnceLock::new();
+/// DB built with `dudb --no-files`: /api/files lists nothing, never the disk.
+static FILES_DISABLED: OnceLock<bool> = OnceLock::new();
 
 #[cfg(test)]
 static TEST_DB: OnceLock<db::test_support::TempDb> = OnceLock::new();
@@ -213,8 +217,18 @@ async fn main() -> Result<()> {
     println!("Loaded {} users", users.len());
 
     let files_indexed = db::has_files(&pool).unwrap_or(false);
-    if files_indexed {
-        println!("File index: present (/api/files served from DB)");
+    let files_cap = db::files_cap(&pool).unwrap_or(0);
+    let files_disabled = db::no_files(&pool).unwrap_or(false);
+    if files_disabled {
+        println!("File index: none (dudb --no-files; /api/files lists no files)");
+    } else if files_indexed {
+        println!(
+            "File index: present (/api/files served from DB, {})",
+            match files_cap {
+                0 => "all files listed".to_string(),
+                n => format!("up to {n} listed per folder, owner and age"),
+            }
+        );
     } else {
         println!(
             "{}",
@@ -224,6 +238,8 @@ async fn main() -> Result<()> {
         );
     }
     let _ = FILES_INDEXED.set(files_indexed);
+    let _ = FILES_CAP.set(files_cap);
+    let _ = FILES_DISABLED.set(files_disabled);
 
     if DB_POOL.set(pool).is_err() {
         eprintln!("{}", "FATAL: DB_POOL already initialized".red());
@@ -430,9 +446,35 @@ pub fn files_indexed() -> bool {
     FILES_INDEXED.get().copied().unwrap_or(false)
 }
 
+/// Unset (tests that skip DB init) means files are not disabled.
+pub fn files_disabled() -> bool {
+    FILES_DISABLED.get().copied().unwrap_or(false)
+}
+
+/// Page size for a file listing served from the DB index: never above the
+/// cap dudb stored, or the page would no longer be the exact largest files.
+pub fn files_limit(requested: usize) -> usize {
+    clamp_to_cap(requested, FILES_CAP.get().copied().unwrap_or(0))
+}
+
+fn clamp_to_cap(requested: usize, cap: usize) -> usize {
+    if cap == 0 {
+        requested
+    } else {
+        requested.min(cap)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_to_cap_zero_means_uncapped() {
+        assert_eq!(clamp_to_cap(2000, 0), 2000);
+        assert_eq!(clamp_to_cap(2000, 1000), 1000);
+        assert_eq!(clamp_to_cap(10, 1000), 10);
+    }
 
     #[test]
     fn test_default_static_dir() {

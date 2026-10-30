@@ -1,20 +1,20 @@
 // src/bin/dudb/ingest_raw.rs
 //
 // Second ingest pass: the raw duscan CSV
-// (INODE,ATIME,MTIME,UID,GID,MODE,SIZE,DISK,PATH) becomes the per-file `files`
+// (INODE,ATIME,MTIME,UID,GID,MODE,SIZE,DISK,PATH) becomes the `folder_files`
 // table so duapi can serve /api/files from the DB instead of a live `ls`.
 // Only regular files are kept — directories already live in `paths`, and the
 // live-filesystem fallback (`item::get_items`) skips non-files too.
 //
-// Two steps keep a billion-row ingest linear (see extsort.rs for why):
+// Two steps, because a folder's files are scattered across the raw CSV:
 //   1. sort_raw_csv     — parse, resolve folder/user, spill sorted runs
-//   2. load_sorted_runs — merge the runs into `files` in primary-key order
+//   2. load_sorted_runs — merge the runs and pack each folder into one row
 use crate::extsort::{merge_runs, FileMeta, RunBuffer};
+use crate::folder_pack::{FolderWriter, ListRule};
 use crate::raw_path::split_folder_name;
 use anyhow::{anyhow, Context, Result};
 use csv::{ByteRecord, ReaderBuilder};
 use dutopia::util::{age_bucket, parse_int, sanitize_mtime, username_from_uid, AgeCfg};
-use rusqlite::types::{ToSqlOutput, ValueRef};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,11 @@ const MAX_UNMATCHED_WARNINGS: u64 = 20;
 
 #[derive(Default, Debug)]
 pub struct RawIngestStats {
-    pub files_inserted: u64,
+    /// Distinct regular files; all of them count in the folder totals.
+    pub files_seen: u64,
+    /// Files in the per-folder lists (largest, above the size floor).
+    pub files_listed: u64,
+    pub folders: u64,
     pub users_inserted: u64,
     pub skipped_non_regular: u64,
     pub unmatched_folders: u64,
@@ -203,48 +207,40 @@ fn hand_off(
         .map_err(|_| anyhow!("sort thread stopped early (disk full in the sort dir?)"))
 }
 
-/// Pass 2: merge the runs into `files` in primary-key order. Every insert
-/// appends to the right edge of the B-tree, so throughput stays flat no
-/// matter how large the table grows.
+/// Pass 2: merge the runs (one folder's files arrive together) and write
+/// one `folder_files` row per folder with its totals and the files `rule`
+/// lists. Folder ids arrive ascending, so every insert appends to the right
+/// edge of the B-tree.
 pub fn load_sorted_runs<F: FnMut(u64)>(
     conn: &Connection,
     sorted: SortedRuns,
+    rule: ListRule,
     mut on_progress: F,
 ) -> Result<RawIngestStats> {
     let SortedRuns { dir, runs, rows, mut stats } = sorted;
     let progress_step = (rows / 100).max(1);
-    let mut insert_file = conn.prepare(
-        "INSERT OR IGNORE INTO files(folder_id, name, user_id, age, size, atime, mtime)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )?;
 
     conn.execute_batch("BEGIN;")?;
-    let mut seen = 0u64;
-    let mut ignored = 0u64;
-    let mut inserted = 0u64;
+    let mut writer = FolderWriter::new(conn, rule)?;
+    let mut merged = 0u64;
     let dropped = merge_runs(&runs, |r| {
-        let name = ToSqlOutput::Borrowed(ValueRef::Text(&r.name));
-        let m = &r.meta;
-        let changed = insert_file.execute(params![
-            r.folder_id, name, m.user_id, m.age, m.size, m.atime, m.mtime
-        ])?;
-        if changed == 0 {
-            ignored += 1;
-        } else {
-            inserted += 1;
-        }
-        seen += 1;
-        if seen.is_multiple_of(progress_step) {
-            on_progress(seen);
+        writer.push(r)?;
+        merged += 1;
+        if merged.is_multiple_of(progress_step) {
+            on_progress(merged);
         }
         Ok(())
     })?;
+    let writer = writer.finish()?;
+    stats.files_seen = writer.files_seen;
+    stats.files_listed = writer.files_listed;
+    stats.folders = writer.folders;
+    drop(writer);
     conn.execute_batch("COMMIT;")?;
     drop(dir);
     on_progress(rows);
 
-    stats.files_inserted = inserted;
-    stats.duplicates = dropped + ignored;
+    stats.duplicates = dropped;
     Ok(stats)
 }
 

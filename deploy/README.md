@@ -73,8 +73,10 @@ oc rollout restart deployment/duapi
 `-shm` file next to it — so no `VACUUM`/`journal_mode` step is needed (a
 `VACUUM` of a billion-row DB rewrites all of it).
 
-The `--raw` pass sorts the per-file rows on disk before inserting them, so its
-cost stays linear at a billion files. Point `--tmp-dir` (or `DUDB_TMPDIR`) at
+The `--raw` pass sorts the per-file rows on disk, then packs each folder's
+files into one compressed row (only the 1000 largest per folder, owner and age;
+`--max-files` changes it, 0 keeps all), so its cost stays linear at a billion
+files. Point `--tmp-dir` (or `DUDB_TMPDIR`) at
 local disk with about a quarter of the raw CSV size free; `--sort-mem` (MiB,
 default 8192) sets the in-memory sort budget. The DB is built as
 `<output>.building` and renamed over `<output>` only when complete, so the old

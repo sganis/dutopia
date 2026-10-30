@@ -1,6 +1,14 @@
 // browser/src/ts/transform.ts
 
-import type { AgeFilterType, FolderItem, RawFolder, ScannedFile, UserStatsJson } from "./models";
+import type {
+  AgeFilterType,
+  FileTotals,
+  FilesResult,
+  FolderItem,
+  RawFolder,
+  ScannedFile,
+  UserStatsJson,
+} from "./models";
 
 const toNum = (v: any) => {
   const n = Number(v);
@@ -72,9 +80,25 @@ export function transformFolders(raw: RawFolder[], filter: AgeFilterType): Folde
     .filter((rf) => rf.path);
 }
 
+/** Totals of a complete file list (desktop / older servers send no totals). */
+export function filesResultFrom(files: ScannedFile[]): FilesResult {
+  const totals: Record<string, FileTotals> = {};
+  for (const f of files ?? []) {
+    if (!f.owner) continue;
+    const t = (totals[f.owner] ??= { count: 0, size: 0, accessed: 0, modified: 0 });
+    t.count += 1;
+    t.size += toNum(f.size);
+    t.accessed = Math.max(t.accessed, toNum(f.accessed));
+    t.modified = Math.max(t.modified, toNum(f.modified));
+  }
+  return { files: files ?? [], totals };
+}
+
+/** Totals of the current folder: its subfolders plus its own files. Files
+ *  come from the per-owner totals, not the (possibly short) file list. */
 export function aggregatePathTotals(
   foldersArr: FolderItem[],
-  filesArr: ScannedFile[],
+  fileTotals: Record<string, FileTotals>,
   p: string
 ): FolderItem {
   let total_count = 0;
@@ -84,6 +108,8 @@ export function aggregatePathTotals(
   let accessed = 0;
   let modified = 0;
   const aggUsers: Record<string, UserStatsJson> = {};
+  const userEntry = (uname: string) =>
+    (aggUsers[uname] ??= { username: uname, count: 0, disk: 0, size: 0, linked: 0, atime: 0, mtime: 0 });
 
   for (const f of foldersArr ?? []) {
     total_count += toNum(f?.total_count);
@@ -93,58 +119,33 @@ export function aggregatePathTotals(
     if (f.accessed > accessed) accessed = f.accessed;
     if (f.modified > modified) modified = f.modified;
 
-    const u = f?.users ?? {};
-    for (const [uname, data] of Object.entries(u)) {
+    for (const [uname, data] of Object.entries(f?.users ?? {})) {
       const d = data as UserStatsJson;
-      const prev = aggUsers[uname] ?? {
-        username: uname,
-        count: 0,
-        disk: 0,
-        size: 0,
-        linked: 0,
-        atime: 0,
-        mtime: 0,
-      };
-      aggUsers[uname] = {
-        username: uname,
-        count: prev.count + toNum(d.count),
-        disk: prev.disk + toNum(d.disk),
-        size: prev.size + toNum(d.size),
-        linked: prev.linked + toNum(d.linked),
-        atime: Math.max(prev.atime, toNum(d.atime)),
-        mtime: Math.max(prev.mtime, toNum(d.mtime)),
-      };
+      const u = userEntry(uname);
+      u.count += toNum(d.count);
+      u.disk += toNum(d.disk);
+      u.size += toNum(d.size);
+      u.linked += toNum(d.linked);
+      u.atime = Math.max(u.atime, toNum(d.atime));
+      u.mtime = Math.max(u.mtime, toNum(d.mtime));
     }
   }
 
-  for (const file of filesArr ?? []) {
-    total_count += 1;
-    total_disk += toNum(file?.size);
-    total_size += toNum(file?.size);
-    if (file.accessed > accessed) accessed = file.accessed;
-    if (file.modified > modified) modified = file.modified;
-
-    const owner = file.owner;
-    if (owner) {
-      const prev = aggUsers[owner] ?? {
-        username: owner,
-        count: 0,
-        disk: 0,
-        size: 0,
-        linked: 0,
-        atime: 0,
-        mtime: 0,
-      };
-      aggUsers[owner] = {
-        username: owner,
-        count: prev.count + 1,
-        disk: prev.disk + toNum(file.size),
-        size: prev.size + toNum(file.size),
-        linked: prev.linked,
-        atime: Math.max(prev.atime, toNum(file.accessed)),
-        mtime: Math.max(prev.mtime, toNum(file.modified)),
-      };
-    }
+  for (const [owner, t] of Object.entries(fileTotals ?? {})) {
+    const count = toNum(t.count);
+    const size = toNum(t.size);
+    total_count += count;
+    total_disk += size;
+    total_size += size;
+    if (t.accessed > accessed) accessed = t.accessed;
+    if (t.modified > modified) modified = t.modified;
+    if (!owner) continue;
+    const u = userEntry(owner);
+    u.count += count;
+    u.disk += size;
+    u.size += size;
+    u.atime = Math.max(u.atime, toNum(t.accessed));
+    u.mtime = Math.max(u.mtime, toNum(t.modified));
   }
 
   return { path: p, total_count, total_disk, total_size, total_linked, accessed, modified, users: aggUsers };

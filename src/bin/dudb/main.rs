@@ -2,12 +2,14 @@
 use anyhow::{Context, Result};
 use clap::{ColorChoice, Parser};
 use colored::Colorize;
-use dutopia::util::{parse_age_pair, print_about, AgeCfg};
+use dutopia::util::{parse_age_pair, parse_file_hint, print_about, AgeCfg};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod extsort;
+mod folder_pack;
+use folder_pack::ListRule;
 mod ingest;
 mod ingest_raw;
 mod raw_path;
@@ -25,10 +27,15 @@ struct Args {
     /// Output SQLite DB file path (defaults to <input_stem>.db)
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Raw duscan CSV: also ingest per-file rows so duapi serves /api/files
-    /// from the DB instead of the live filesystem
-    #[arg(long, value_name = "FILE")]
+    /// Raw duscan CSV: also index each folder's files (totals plus its
+    /// largest files) so duapi serves /api/files from the DB instead of the
+    /// live filesystem
+    #[arg(long, value_name = "FILE", conflicts_with = "no_files")]
     raw: Option<PathBuf>,
+    /// Folders only, on purpose: duapi lists no files at all (instead of
+    /// reading the live filesystem, as it does for a DB built without --raw)
+    #[arg(long)]
+    no_files: bool,
     /// Age buckets in days as YOUNG,OLD for per-file rows; must match the
     /// values dusum ran with (defaults to 60,600)
     #[arg(long, value_parser = parse_age_pair, value_name = "YOUNG,OLD")]
@@ -40,6 +47,14 @@ struct Args {
     /// Memory for the --raw sort in MiB (two buffers of half each)
     #[arg(long, value_name = "MIB", default_value_t = 8192)]
     sort_mem: usize,
+    /// --raw lists only the N largest files per folder, owner and age
+    /// bucket; the rest only count in the folder totals (0 = no limit)
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    max_files: usize,
+    /// --raw lists only files of at least this size (e.g. 100k, 1M, 1G);
+    /// smaller ones only count in the folder totals
+    #[arg(long, value_name = "SIZE", default_value = "1M", value_parser = parse_size)]
+    min_file_size: u64,
     /// Overwrite an existing DB instead of failing
     #[arg(long)]
     rebuild: bool,
@@ -129,18 +144,29 @@ fn main() -> Result<()> {
         );
         done(&mut phase);
 
-        println!("Writing files table (2/2)...");
+        println!("Packing files per folder (2/2)...");
         let total = sorted.rows();
-        let fs = ingest_raw::load_sorted_runs(&conn, sorted, percent(total))?;
+        let rule = ListRule { cap: args.max_files, min_size: args.min_file_size };
+        let fs = ingest_raw::load_sorted_runs(&conn, sorted, rule, percent(total))?;
+        let raw_csv = raw.to_string_lossy();
         schema::write_files_metadata(
             &conn,
-            &raw.to_string_lossy(),
-            file_mtime(raw),
-            fs.files_inserted,
-            age_cfg,
+            &schema::FilesMeta {
+                raw_csv: &raw_csv,
+                raw_mtime: file_mtime(raw),
+                total: fs.files_seen,
+                listed: fs.files_listed,
+                cap: args.max_files,
+                min_size: args.min_file_size,
+                age_cfg,
+            },
         )?;
         done(&mut phase);
         file_stats = Some(fs);
+    }
+
+    if args.no_files {
+        schema::write_no_files_metadata(&conn)?;
     }
 
     println!("Building indexes...");
@@ -162,7 +188,11 @@ fn main() -> Result<()> {
     println!("Paths        : {}", stats.paths_inserted);
     println!("Users        : {}", stats.users_inserted);
     if let Some(fs) = &file_stats {
-        println!("File rows    : {}", fs.files_inserted);
+        println!("Files        : {} in {} folders", fs.files_seen, fs.folders);
+        println!(
+            "Files listed : {} (largest {} >= {} bytes per folder, owner and age)",
+            fs.files_listed, args.max_files, args.min_file_size
+        );
         if fs.skipped_non_regular > 0 {
             println!("Non-regular  : {} (skipped)", fs.skipped_non_regular);
         }
@@ -175,6 +205,10 @@ fn main() -> Result<()> {
     }
     println!("Elapsed time : {:.2} seconds", started.elapsed().as_secs_f64());
     Ok(())
+}
+
+fn parse_size(s: &str) -> Result<u64, String> {
+    parse_file_hint(s).ok_or_else(|| format!("invalid size {s:?} (e.g. 0, 100k, 1M, 1G)"))
 }
 
 fn fail(msg: &str) -> ! {

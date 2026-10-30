@@ -6,7 +6,7 @@ use serial_test::serial;
 
 use crate::{DB_POOL, FILES_INDEXED, TEST_DB, USERS};
 use dutopia::db::FolderOut;
-use dutopia::item::FsItemOut;
+use dutopia::item::FilesOut;
 
 const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
@@ -177,7 +177,7 @@ async fn test_get_files_handler_db_admin_ok() {
     let resp = get_files_handler(claims, Query(q)).await.into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
-    let items: Vec<FsItemOut> = serde_json::from_slice(&body).unwrap();
+    let items = serde_json::from_slice::<FilesOut>(&body).unwrap().files;
     let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
     assert_eq!(paths, vec!["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"]);
 }
@@ -200,7 +200,7 @@ async fn test_get_files_handler_db_filters() {
     let resp = get_files_handler(claims, Query(q)).await.into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
-    let items: Vec<FsItemOut> = serde_json::from_slice(&body).unwrap();
+    let items = serde_json::from_slice::<FilesOut>(&body).unwrap().files;
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|i| i.owner == "alice"));
 }
@@ -224,7 +224,7 @@ async fn test_get_files_handler_clamps_to_max_page_size() {
     let resp = get_files_handler(claims, Query(q)).await.into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
-    let items: Vec<FsItemOut> = serde_json::from_slice(&body).unwrap();
+    let items = serde_json::from_slice::<FilesOut>(&body).unwrap().files;
     assert_eq!(items.len(), 2);
     unsafe { std::env::remove_var("MAX_PAGE_SIZE") };
 }

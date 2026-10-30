@@ -1,6 +1,10 @@
 # Plan: File-Level Index in SQLite (replace live `ls` in /api/files)
 
-**Status:** implemented (2026-07-30) — schema v3, `dudb --raw`, `db::list_files`
+**Status:** implemented (2026-07-30) — schema v3, `dudb --raw`, `db::list_files`.
+Superseded in schema v4 (2026-10-30): the one-row-per-file `files` table grew a
+1.1 B-file DB from 8 GB to 72 GB, so files are now packed into one compressed
+`folder_files` blob per folder (`src/filepack.rs`), capped to the `--max-files`
+largest per (folder, user, age).
 **Date:** 2026-07-30
 **Problem:** `/api/files` lists files with a live `fs::read_dir` (`src/item.rs::get_items`).
 In production the API host has no access to the scanned filesystem, so file listing

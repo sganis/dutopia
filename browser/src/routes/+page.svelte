@@ -3,6 +3,8 @@
   import { onMount, onDestroy } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS, escapeHtml } from "../ts/util";
+  import { aggregatePathTotals } from "../ts/transform";
+  import type { FileTotals } from "../ts/models";
   import { api } from "$api";
   import { API_URL, State } from "../ts/store.svelte";
   import Svelecte, { addRenderer } from "svelecte";
@@ -81,7 +83,10 @@
   let fullPath = $state("");
   let folders = $state<FolderItem[]>([]);
   let files = $state<ScannedFile[]>([]);
+  // All of the folder's own files per owner; `files` lists only the largest.
+  let fileTotals = $state<Record<string, FileTotals>>({});
   let loading = $state(false);
+  let filesLoading = $state(false);
   let initializing = $state(false);
   let progress_current = $state(0);
   let progress_total = $state(0);
@@ -293,79 +298,6 @@
     }
   }
 
-  function aggregatePathTotals(foldersArr: FolderItem[], filesArr: ScannedFile[], p: string): FolderItem {
-    let total_count = 0;
-    let total_disk = 0;
-    let total_size = 0;
-    let total_linked = 0;
-    let accessed = 0;
-    let modified = 0;
-    const aggUsers: Record<string, UserStatsJson> = {};
-
-    for (const f of foldersArr ?? []) {
-      total_count += toNum(f?.total_count);
-      total_disk += toNum(f?.total_disk);
-      total_size += toNum(f?.total_size);
-      total_linked += toNum(f?.total_linked);
-      if (f.accessed > accessed) accessed = f.accessed;
-      if (f.modified > modified) modified = f.modified;
-
-      const u = f?.users ?? {};
-      for (const [uname, data] of Object.entries(u)) {
-        const d = data as UserStatsJson;
-        const prev = aggUsers[uname] ?? {
-          username: uname,
-          count: 0,
-          disk: 0,
-          size: 0,
-          linked: 0,
-          atime: 0,
-          mtime: 0,
-        };
-        aggUsers[uname] = {
-          username: uname,
-          count: prev.count + toNum(d.count),
-          disk: prev.disk + toNum(d.disk),
-          size: prev.size + toNum(d.size),
-          linked: prev.linked + toNum(d.linked),
-          atime: Math.max(prev.atime, toNum(d.atime)),
-          mtime: Math.max(prev.mtime, toNum(d.mtime)),
-        };
-      }
-    }
-
-    for (const file of filesArr ?? []) {
-      total_count += 1;
-      total_disk += toNum(file?.size);
-      total_size += toNum(file?.size);
-      if (file.accessed > accessed) accessed = file.accessed;
-      if (file.modified > modified) modified = file.modified;
-
-      const owner = file.owner;
-      if (owner) {
-        const prev = aggUsers[owner] ?? {
-          username: owner,
-          count: 0,
-          disk: 0,
-          size: 0,
-          linked: 0,
-          atime: 0,
-          mtime: 0,
-        };
-        aggUsers[owner] = {
-          username: owner,
-          count: prev.count + 1,
-          disk: prev.disk + toNum(file.size),
-          size: prev.size + toNum(file.size),
-          linked: prev.linked,
-          atime: Math.max(prev.atime, toNum(file.accessed)),
-          mtime: Math.max(prev.mtime, toNum(file.modified)),
-        };
-      }
-    }
-
-    return { path: p, total_count, total_disk, total_size, total_linked, accessed, modified, users: aggUsers };
-  }
   //#endregion
 
   //#region derived state
@@ -392,7 +324,19 @@
     return Math.round(Math.max(0, Math.min(100, p)) * 10) / 10;
   };
 
-  const pathTotals = $derived.by(() => aggregatePathTotals(folders, files, path));
+  const pathTotals = $derived.by(() => aggregatePathTotals(folders, fileTotals, path));
+
+  // The folder's files the list leaves out (only the largest are listed).
+  const unlistedFiles = $derived.by(() => {
+    let count = 0;
+    let size = 0;
+    for (const t of Object.values(fileTotals)) {
+      count += toNum(t.count);
+      size += toNum(t.size);
+    }
+    for (const f of files) size -= toNum(f.size);
+    return { count: Math.max(0, count - files.length), size: Math.max(0, size) };
+  });
 
   const sortedfiles = $derived.by(() => {
     const arr = files ? [...files] : [];
@@ -435,17 +379,43 @@
     };
   }
 
+  // Files load in the background so folders render as soon as they arrive.
+  // Each fetch bumps the token; a reply for a folder already left is dropped.
+  let filesToken = 0;
+
+  async function fetchFiles(_p: string, userFilter: string[], age: number) {
+    const token = ++filesToken;
+    // /api/files rejects the roots ("", "/").
+    if (_p === "" || _p === "/") {
+      filesLoading = false;
+      return;
+    }
+    filesLoading = true;
+    try {
+      const result = await api.getFiles(_p, userFilter, age);
+      if (token === filesToken) {
+        files = result.files;
+        fileTotals = result.totals;
+      }
+    } finally {
+      if (token === filesToken) filesLoading = false;
+    }
+  }
+
   const fetchFolders = createDoItAgain(async (_p: string) => {
     loading = true;
+    files = [];
+    fileTotals = {};
+    filesToken++;
+    const userFilter: string[] = selectedUser === "All Users" ? [] : [selectedUser];
+    const age = ageFilter;
     try {
-      const userFilter: string[] = selectedUser === "All Users" ? [] : [selectedUser];
-      const raw: RawFolder[] = await api.getFolders(_p, userFilter, ageFilter);
-      folders = transformFolders(raw, ageFilter);
-      // /api/files is a live directory walk and rejects the roots ("", "/").
-      files = _p === "" || _p === "/" ? [] : await api.getFiles(_p, userFilter, ageFilter);
+      const raw: RawFolder[] = await api.getFolders(_p, userFilter, age);
+      folders = transformFolders(raw, age);
     } finally {
       loading = false;
     }
+    void fetchFiles(_p, userFilter, age);
   });
   //#endregion
 
@@ -855,6 +825,10 @@
         />
       {/each}
 
+      {#if filesLoading}
+        <div class="p-3 text-sm text-gray-400 animate-pulse">Loading files...</div>
+      {/if}
+
       {#each sortedfiles as file}
         <FileBar
           {file}
@@ -865,6 +839,16 @@
           onDelete={targetForDeletion}
         />
       {/each}
+
+      {#if unlistedFiles.count > 0}
+        <div class="flex" title="Only the largest files are listed">
+          <span class="material-symbols-outlined text-4xl">more_horiz</span>
+          <div class="flex grow items-center justify-between px-2 py-1 border border-dashed border-gray-500 rounded text-xs text-gray-300">
+            <span>{humanCount(unlistedFiles.count)} more {unlistedFiles.count === 1 ? "file" : "files"}</span>
+            <span class="text-sm font-semibold">{humanBytes(unlistedFiles.size)}</span>
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
   <div class="grow"></div>

@@ -1,6 +1,6 @@
 // browser/src/ts/transform.test.ts
 import { describe, it, expect } from 'vitest';
-import { transformFolders, aggregatePathTotals, safeNumber } from './transform';
+import { transformFolders, aggregatePathTotals, filesResultFrom, safeNumber } from './transform';
 import type { RawFolder, FolderItem, ScannedFile } from './models';
 
 const mkAge = (count: number, size: number, atime = 100, mtime = 200) => ({
@@ -89,46 +89,62 @@ describe('aggregatePathTotals', () => {
     },
   };
 
-  const file: ScannedFile = {
-    path: '/a/f.txt',
-    size: 100,
-    accessed: 150,
-    modified: 250,
-    owner: 'alice',
-  };
+  // alice owns 3 files in /a: f.txt is listed, two small ones are not.
+  const totals = { alice: { count: 3, size: 100, accessed: 150, modified: 250 } };
 
   it('sums folder + file totals', () => {
-    const agg = aggregatePathTotals([folder], [file], '/a');
+    const agg = aggregatePathTotals([folder], totals, '/a');
     expect(agg.path).toBe('/a');
-    expect(agg.total_count).toBe(6);
+    expect(agg.total_count).toBe(8);
     expect(agg.total_size).toBe(600);
     expect(agg.total_disk).toBe(600);
   });
 
   it('takes max of accessed/modified across folders and files', () => {
-    const agg = aggregatePathTotals([folder], [file], '/a');
+    const agg = aggregatePathTotals([folder], totals, '/a');
     expect(agg.accessed).toBe(150);
     expect(agg.modified).toBe(250);
   });
 
   it('merges users across folder stats and file owner', () => {
-    const agg = aggregatePathTotals([folder], [file], '/a');
-    expect(agg.users.alice.count).toBe(6);
+    const agg = aggregatePathTotals([folder], totals, '/a');
+    expect(agg.users.alice.count).toBe(8);
     expect(agg.users.alice.size).toBe(600);
     expect(agg.users.alice.atime).toBe(150);
   });
 
-  it('handles empty arrays', () => {
-    const agg = aggregatePathTotals([], [], '/x');
+  it('handles empty inputs', () => {
+    const agg = aggregatePathTotals([], {}, '/x');
     expect(agg.total_count).toBe(0);
     expect(agg.users).toEqual({});
     expect(agg.path).toBe('/x');
   });
 
-  it('skips orphan files with no owner', () => {
-    const orphan: ScannedFile = { ...file, owner: '' };
-    const agg = aggregatePathTotals([], [orphan], '/a');
+  it('counts orphan files with no owner but adds no user', () => {
+    const agg = aggregatePathTotals([], { '': { count: 1, size: 5, accessed: 0, modified: 0 } }, '/a');
     expect(agg.total_count).toBe(1);
     expect(agg.users).toEqual({});
+  });
+});
+
+describe('filesResultFrom', () => {
+  const mk = (path: string, owner: string, size: number, modified: number): ScannedFile => ({
+    path,
+    owner,
+    size,
+    accessed: 0,
+    modified,
+  });
+
+  it('totals a complete list per owner', () => {
+    const files = [mk('/a/x', 'alice', 10, 5), mk('/a/y', 'alice', 30, 9), mk('/a/z', 'bob', 20, 1)];
+    const r = filesResultFrom(files);
+    expect(r.files).toBe(files);
+    expect(r.totals.alice).toEqual({ count: 2, size: 40, accessed: 0, modified: 9 });
+    expect(r.totals.bob.count).toBe(1);
+  });
+
+  it('skips files with no owner', () => {
+    expect(filesResultFrom([mk('/a/x', '', 1, 1)]).totals).toEqual({});
   });
 });

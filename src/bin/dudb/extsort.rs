@@ -1,15 +1,13 @@
 // src/bin/dudb/extsort.rs
 //
-// External merge sort for the per-file rows of `dudb --raw`. The `files`
-// table is clustered on (folder_id, name); inserting a billion rows in duscan
-// order means every insert lands on a random B-tree page, which is fine while
-// the DB fits in RAM and collapses to one disk read per insert once it does
-// not. Sorting first turns the B-tree build into a sequential append whose
-// cost no longer depends on RAM.
+// External merge sort for the per-file rows of `dudb --raw`. duscan emits a
+// folder's files scattered across the CSV; sorting a billion rows by
+// (folder_id, name) in bounded memory brings each folder's files together so
+// `folder_pack` can write one row per folder, in ascending folder_id order.
 //
 // Runs are zstd-compressed record streams. Equal keys keep input order (stable
 // sort within a run, lower run index first across runs), so the merge keeps
-// the first occurrence exactly like `INSERT OR IGNORE` in CSV order did.
+// the first occurrence of a duplicated path in CSV order.
 use anyhow::{bail, Context, Result};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

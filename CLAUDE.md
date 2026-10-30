@@ -34,7 +34,7 @@ npm run check                # TypeScript/Svelte type checking
 ```bash
 ./duscan /path -o scan.csv               # 1. Scan filesystem
 ./dusum scan.csv -o sum.csv              # 2. Aggregate by folder/user/age
-./dudb sum.csv --raw scan.csv -o du.db   # 3. Build SQLite DB (--raw adds per-file rows)
+./dudb sum.csv --raw scan.csv -o du.db   # 3. Build SQLite DB (--raw adds the file index)
 ./duapi du.db --port 8000                # 4. Serve REST API + frontend
 ```
 
@@ -56,17 +56,18 @@ Each binary is a directory with focused modules under `src/bin/<name>/`:
 
 - **duscan** — Multi-threaded filesystem scanner. Streams metadata as CSV/zstd with 32MB buffer batching.
 - **dusum** — Aggregates raw scan data into rollups by folder, user, and age bucket (0=<60d, 1=60-600d, 2=>600d).
-- **dudb** — Builds the SQLite DB from the dusum CSV (`paths`/`users`/`stats` tables). With `--raw scan.csv` it also ingests per-file rows into the `files` table so `/api/files` is served from the DB instead of a live filesystem read (required in production where the API host cannot see the scanned filesystem). The raw pass external-sorts rows by (folder_id, name) before inserting (`extsort.rs`): unsorted inserts into the clustered `files` B-tree slow down quadratically and stall around 1B files. Builds into `<output>.building`, renames on success, and leaves the DB in DELETE journal mode. Resolves uid→username via the local account database, so run it on a host in the same identity domain as dusum.
-- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` uses the DB `files` table when present (`has_files` metadata), else falls back to a live `read_dir`.
+- **dudb** — Builds the SQLite DB from the dusum CSV (`paths`/`users`/`stats` tables). With `--raw scan.csv` it also builds the file index so `/api/files` is served from the DB instead of a live filesystem read (required in production where the API host cannot see the scanned filesystem): `folder_files` holds one zstd-compressed `filepack` blob per folder (~18 B/file vs ~57 B for the old one-row-per-file v3 table), keeping only the `--max-files` (default 1000) largest files per (folder, user, age). The raw pass external-sorts rows by (folder_id, name) (`extsort.rs`) so each folder's files arrive together, then `folder_pack.rs` caps and packs them. Builds into `<output>.building`, renames on success, and leaves the DB in DELETE journal mode. Resolves uid→username via the local account database, so run it on a host in the same identity domain as dusum.
+- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` uses the DB `folder_files` index when present (`has_files` metadata), largest first and clamped to `files_cap`, else falls back to a live `read_dir`.
 - **duhuman** — Converts machine data (epochs, UIDs, mode bits) to human-readable format. Single-file binary.
 - **duzip** — Bidirectional CSV ↔ Zstandard compression. Single-file binary.
 - **dumachine** — Binary data processor. Single-file binary.
 
 ### Shared Library (src/)
 
-- `lib.rs` — Re-exports util, auth, storage, db, item, query, analytic
+- `lib.rs` — Re-exports util, auth, storage, db, filepack, item, query, analytic
 - `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su)
-- `db.rs` — Read-only SQLite pool + queries over the dudb DB (`list_children`, `list_files`, `has_files`)
+- `db.rs` — Read-only SQLite pool + queries over the dudb DB (`list_children`, `list_files`, `has_files`, `files_cap`)
+- `filepack.rs` — Binary format of the per-folder file blobs (columnar varints + zstd), shared by dudb and duapi
 - `item.rs` — Live-filesystem file listing (`get_items`), the /api/files fallback when the DB has no file index
 - `storage.rs` — Cross-platform storage info (Unix: statvfs, Windows: Win32 API)
 - `util/` — Row struct, CSV helpers, age bucketing (shared by dusum/dudb), human formatting, path utilities, platform-specific functions (incl. uid→username)
@@ -108,7 +109,7 @@ Uses `#[cfg(...)]` conditional compilation throughout. Key differences:
 
 ## CI/CD
 
-GitHub Actions on push to master (Ubuntu only). Runs `cargo test -r` and `npm run build`. Auto-bumps patch version via cargo-edit on release.
+GitHub Actions on push to master (Ubuntu only). Runs `cargo test -r` and `npm run build`. Auto-bumps patch version via cargo-edit on release and syncs `browser/package.json` to it (the SPA header shows that version).
 
 ## Constraints
 
