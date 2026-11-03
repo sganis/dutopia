@@ -43,5 +43,20 @@ export type ScannedFile = {
   owner: string;
 };
 
+/** One owner's files directly in a folder, listed or not. */
+export type FileTotals = {
+  count: number;
+  size: number;
+  accessed: number;
+  modified: number;
+};
+
+/** /api/files: a folder's largest files, plus totals of all its files per
+ *  owner (the list can be short; the totals never are). */
+export type FilesResult = {
+  files: ScannedFile[];
+  totals: Record<string, FileTotals>;
+};
+
 export type SortKey = "disk" | "size" | "count";
 export type AgeFilterType = -1 | 0 | 1 | 2;

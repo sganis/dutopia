@@ -1,9 +1,10 @@
 // browser/src/ts/api.web.svelte.ts
 import { State, API_URL } from "./store.svelte";
 import { fetchCached, initDbVersion } from './cache.js';
+import { filesResultFrom } from "./transform";
+import type { FilesResult, ScannedFile } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
-type ScannedFile = { path: string; size: number; modified: string; owner: string };
 export type RawFolder = { path: string; users: Record<string, Record<'0'|'1'|'2', AgeMini>> };
 
 // Types also consumed by desktop-only components (ScanPanel). Exported here
@@ -94,14 +95,15 @@ class Api {
     return result ?? []
   }
 
-  async getFiles(path: string, users: string[], age?: number): Promise<ScannedFile[]> {
+  async getFiles(path: string, users: string[], age?: number): Promise<FilesResult> {
     const pathParam = `path=${encodeURIComponent(path)}`
     const userParam = users.length > 0 ? `&users=${encodeURIComponent(users.join(','))}` : ''
     const ageParam = age !== undefined && age !== -1 ? `&age=${age}` : ''
     const url = `files?${pathParam}${userParam}${ageParam}`
-    // /api/files returns FilesOut { files, totals }, not a bare array.
-    let result = await this.request<{ files?: ScannedFile[] }>(url, "GET", undefined, true)
-    return result?.files ?? []
+    const result = await this.request<FilesResult | ScannedFile[]>(url, "GET", undefined, true)
+    // A bare array is a pre-totals response (old server or cache entry).
+    if (Array.isArray(result)) return filesResultFrom(result)
+    return result ?? { files: [], totals: {} }
   }
 
   /** One-shot probe of /api/health. Caches the smtp_configured flag on the

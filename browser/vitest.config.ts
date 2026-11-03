@@ -20,5 +20,9 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.ts'],
     globals: false,
+    // Node >= 25 ships its own `localStorage` global, undefined without
+    // --localstorage-file. It shadows jsdom's, so store.svelte.ts crashes on
+    // import. Turn Node's off and let jsdom provide it.
+    execArgv: ['--no-experimental-webstorage'],
   },
 });

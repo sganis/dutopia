@@ -7,13 +7,32 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 
 beforeAll(() => {
   window.matchMedia = window.matchMedia || ((query: string) => ({ matches: false, media: query }) as MediaQueryList);
+  // jsdom gaps hit by Svelecte's dropdown and Svelte transitions; without
+  // them the test passes but vitest reports unhandled errors and exits 1.
+  Element.prototype.scroll ??= function () {};
+  Element.prototype.getAnimations ??= () => [];
+  // jsdom computes no CSS, so Svelecte's pixelGetter (maxHeight, paddingTop,
+  // paddingBottom) finds no "<n>px" value. Give those a pixel value.
+  const pixelProps = new Set(['maxHeight', 'paddingTop', 'paddingBottom']);
+  const realStyle = window.getComputedStyle.bind(window);
+  window.getComputedStyle = ((el: Element, pseudo?: string | null) => {
+    const s = realStyle(el, pseudo);
+    return new Proxy(s, {
+      get(t, p) {
+        const v = Reflect.get(t, p);
+        if (typeof v === 'function') return v.bind(t);
+        if (typeof p === 'string' && pixelProps.has(p) && !/\d+[a-zA-Z]+/.test(v)) return '300px';
+        return v;
+      },
+    });
+  }) as typeof window.getComputedStyle;
 });
 
 vi.mock('$api', () => ({
   api: {
     getUsers: async () => ['user01', 'user02'],
     getFolders: async () => [],
-    getFiles: async () => [],
+    getFiles: async () => ({ files: [], totals: {} }),
     probeHealth: async () => {},
   },
 }));
