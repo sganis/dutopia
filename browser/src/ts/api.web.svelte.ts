@@ -34,6 +34,8 @@ class Api {
   public filesystems: string[] = $state([]);
   /** Mirrors /api/health.trash_undo_hours: how long Keep can undo a trash. */
   public trashUndoHours: number = $state(24);
+  /** Mirrors /api/health.trash_keep_days: how long moved items stay in .trash. */
+  public trashKeepDays: number = $state(30);
 
   private async request<T>(
     endpoint: string = "",
@@ -126,6 +128,7 @@ class Api {
       this.smtpConfigured = !!data?.smtp_configured;
       this.filesystems = Array.isArray(data?.filesystems) ? data.filesystems : [];
       if (typeof data?.trash_undo_hours === 'number') this.trashUndoHours = data.trash_undo_hours;
+      if (typeof data?.trash_keep_days === 'number') this.trashKeepDays = data.trash_keep_days;
       await initDbVersion(typeof data?.db_version === 'string' ? data.db_version : null);
     } catch {
       /* network hiccup — leave smtpConfigured and the version at previous values */

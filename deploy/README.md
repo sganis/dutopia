@@ -183,8 +183,8 @@ In the UI the home page lists the filesystems; trash something, then
 ## 9. Trash cron
 
 The trash icon only queues items; a root cron on a node that mounts the
-filesystems moves them to `<fs>/.trash` after the 24h undo window and purges
-them after 30 days. Install, dry run, schedule, rerun, restore and
+filesystems moves them to `<fs>/.trash` after the 24h undo window
+(`TRASH_UNDO_HOURS`) and purges them after 30 days (`TRASH_KEEP_DAYS`). Install, dry run, schedule, rerun, restore and
 troubleshooting: **[TRASH.md](TRASH.md)**.
 
 ---

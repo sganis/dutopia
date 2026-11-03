@@ -26,8 +26,9 @@ class FakeApi:
     /api/trash/claim returns `items`, POST /api/trash/report records the
     body. Every request is kept in `requests` as (method, path, body)."""
 
-    def __init__(self, filesystems=(), items=(), honor=True):
+    def __init__(self, filesystems=(), items=(), honor=True, keep_days=None):
         self.filesystems, self.items, self.requests = list(filesystems), list(items), []
+        self.keep_days = keep_days
         # honor=False plays an older duapi that ignores ?dry_run and ?fs.
         self.honor = honor
 
@@ -49,7 +50,10 @@ class FakeApi:
 
             def do_GET(self):
                 api.requests.append(("GET", self.path, None, self.headers.get("Authorization")))
-                self._reply({"filesystems": api.filesystems})
+                health = {"filesystems": api.filesystems}
+                if api.keep_days is not None:
+                    health["trash_keep_days"] = api.keep_days
+                self._reply(health)
 
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
@@ -311,13 +315,9 @@ class Main(unittest.TestCase):
         self.assertEqual(api.posts("/api/trash/claim")[0][3], "Bearer tok")
         self.assertEqual(len([n for n in saved if n.endswith(".json")]), 1)
 
-    def test_claims_only_filesystems_mounted_here(self):
-        # Without --dev the mount check applies: these are not mount points.
-        with FakeApi(filesystems=["/red/nas1", "/red/nas2"]) as api, \
-                tempfile.TemporaryDirectory() as state:
-            rc, _ = run_main(api, "--allow-http", "--state-dir", state)
-        self.assertEqual(rc, 0)
-        self.assertEqual(api.posts("/api/trash/claim"), [])  # nothing mounted: claim nothing
+    def test_local_filesystems_are_the_mounted_allowed_ones(self):
+        self.assertEqual(tm.local_filesystems(["/", "/no/such/mount"], None, check_mount=True), ["/"])
+        self.assertEqual(tm.local_filesystems(["/a", "/b"], {"/b"}, check_mount=False), ["/b"])
 
     def test_fs_flag_narrows_the_claim(self):
         with FakeApi(filesystems=["/red/nas1", "/red/nas2"]) as api:
@@ -469,6 +469,64 @@ class Report(Fs):
         self.assertEqual(rc, 1)  # the save failed: flagged for the cron mail
         self.assertFalse(os.path.exists(p))  # but the claimed item was moved
         self.assertEqual(len(api.posts("/api/trash/report")), 1)
+
+
+
+class Modes(Fs):
+    """`move`, `purge` (default: both), and the purge age taken from the server."""
+
+    def setUp(self):
+        super().setUp()
+        self._st = tempfile.TemporaryDirectory()
+        self.state = self._st.name
+        today = datetime.date.today()
+        self.old = os.path.join(self.fs, ".trash", (today - datetime.timedelta(days=3)).isoformat())
+        os.makedirs(self.old)
+
+    def tearDown(self):
+        self._st.cleanup()
+        super().tearDown()
+
+    def _main(self, *args, token="tok"):
+        env = {"TRASH_TOKEN": token} if token else {}
+        with mock.patch.dict(os.environ, env):
+            if not token:
+                os.environ.pop("TRASH_TOKEN", None)
+            return tm.main(["--dev", "--state-dir", self.state, *args])
+
+    def test_keep_days_come_from_the_server(self):
+        with FakeApi(filesystems=[self.fs], keep_days=1) as api:
+            self.assertEqual(self._main("--api", api.url), 0)
+        self.assertFalse(os.path.exists(self.old))  # 3 days old > the server's 1
+
+    def test_keep_days_flag_overrides_the_server(self):
+        with FakeApi(filesystems=[self.fs], keep_days=1) as api:
+            self.assertEqual(self._main("--api", api.url, "--keep-days", "30"), 0)
+        self.assertTrue(os.path.isdir(self.old))
+
+    def test_move_only_does_not_purge(self):
+        f = self.mk("p/file")
+        with FakeApi(filesystems=[self.fs], items=[self.item(f)], keep_days=1) as api:
+            self.assertEqual(self._main("move", "--api", api.url), 0)
+        self.assertFalse(os.path.exists(f))
+        self.assertTrue(os.path.isdir(self.old))
+
+    def test_purge_only_claims_nothing_and_needs_no_token(self):
+        with FakeApi(filesystems=[self.fs], items=[self.item(self.mk("p/file"))], keep_days=1) as api:
+            self.assertEqual(self._main("purge", "--api", api.url, token=None), 0)
+        self.assertEqual(api.posts("/api/trash/claim"), [])
+        self.assertTrue(os.path.isfile(self.fs + "/p/file"))
+        self.assertFalse(os.path.exists(self.old))
+
+    def test_purge_only_without_an_api(self):
+        rc = self._main("purge", "--fs", self.fs, "--keep-days", "1", token=None)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(self.old))
+
+    def test_unknown_command_and_removed_flags_are_refused(self):
+        for args in (["clean"], ["--purge-only"], ["--allow-http"], ["--min-uid", "0"]):
+            with self.assertRaises(SystemExit, msg=args):
+                self._main(*args)
 
 
 if __name__ == "__main__":

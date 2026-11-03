@@ -115,7 +115,8 @@ Found while building and reviewing it (see `deploy/README.md` §9):
   moved/skipped/error in chunks, Keep records "kept". The panel's History tab
   shows it; a late Keep says what happened; a moved item cannot be re-queued
   until the next scan; due items of filesystems no longer listed are retired.
-- **Operations**: `--dry-run` (server confirms it applied it, `X-Trash-Dry-Run`),
+- **Operations**: `trash_mover.py [move|purge]` (default both), `--dry-run`
+  (server confirms it applied it, `X-Trash-Dry-Run`), `TRASH_KEEP_DAYS`,
   single-instance lock, `--batch` reruns, `TRASH_UNDO_HOURS`, `--dev` for local
   testing, restore instructions.
 - **UI**: rows show "in trash · keep" and toggle Keep; the Notify email gives

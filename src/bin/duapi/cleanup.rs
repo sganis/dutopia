@@ -143,6 +143,7 @@ pub async fn notify_handler(
         &req.paths,
         req.message.as_deref(),
         &trash_after,
+        crate::trash::keep_days(),
     );
 
     let send_fut = tokio::task::spawn_blocking({
@@ -349,6 +350,7 @@ fn render_email_body(
     items: &[PathItem],
     message: Option<&str>,
     trash_after: &HashMap<String, i64>,
+    keep_days: i64,
 ) -> String {
     let mut body = String::with_capacity(256 + items.len() * 80);
     body.push_str("Hello ");
@@ -382,12 +384,12 @@ fn render_email_body(
     body.push_str("\nTotal: ");
     body.push_str(&human_bytes(total));
     if items.iter().any(|it| trash_after.contains_key(&it.path)) {
-        body.push_str(
+        body.push_str(&format!(
             "\n\nPaths marked \"trash after\" are queued for the Dutopia trash: after that \
-             time they are moved to the filesystem's .trash folder and deleted 30 days \
+             time they are moved to the filesystem's .trash folder and deleted {keep_days} days \
              later. To keep one, open Dutopia, click the trash button at the top right and \
-             press Keep on it before then.",
-        );
+             press Keep on it before then."
+        ));
     }
     body.push_str("\n\n");
     body.push_str("You can ask your admin for a cleanup script that does this automatically.\n");
@@ -497,6 +499,7 @@ mod tests {
             &[p("/tmp/a", 1000), p("/tmp/b", 2000)],
             Some("please"),
             &std::collections::HashMap::new(),
+            30,
         );
         assert!(body.contains("/tmp/a"));
         assert!(body.contains("/tmp/b"));
@@ -531,7 +534,8 @@ mod tests {
     #[test]
     fn render_email_body_tells_the_trash_date_and_keep() {
         let after = std::collections::HashMap::from([("/tmp/a".to_string(), 1_800_000_000i64)]);
-        let body = render_email_body("admin", "alice", &[p("/tmp/a", 1), p("/tmp/b", 2)], None, &after);
+        let body = render_email_body("admin", "alice", &[p("/tmp/a", 1), p("/tmp/b", 2)], None, &after, 7);
+        assert!(body.contains("deleted 7 days later"), "{body}");
         let line_a = body.lines().find(|l| l.contains("/tmp/a")).unwrap();
         assert!(line_a.contains("trash after 2027-01-15"), "{line_a}");
         let line_b = body.lines().find(|l| l.contains("/tmp/b")).unwrap();

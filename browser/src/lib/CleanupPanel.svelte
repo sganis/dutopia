@@ -153,7 +153,7 @@
           <div class="text-lg font-semibold text-gray-100">Trash</div>
           <div class="text-xs text-gray-400">
             Items move to the filesystem's .trash {api.trashUndoHours}h after they
-            are queued and are purged after 30 days. Keep undoes it until then.
+            are queued and are purged after {api.trashKeepDays} days. Keep undoes it until then.
           </div>
         </div>
         <button

@@ -119,6 +119,7 @@ Uses `#[cfg(...)]` conditional compilation throughout. Key differences:
 - `FILESYSTEMS` — Comma-separated mount points duscan scans (duapi). The home page (`/api/folders?path=`) lists one row per filesystem instead of `/`; only paths inside them can be trashed. `/api/health` returns the list
 - `TRASH_DIR` — Folder of the trash queue `queue.json` (duapi, default `/data/trash`)
 - `TRASH_UNDO_HOURS` — Hours an item waits in the trash queue before the cron may claim it (the Keep window; default 24, `0` for local testing with `trash_mover.py --dev`)
+- `TRASH_KEEP_DAYS` — Days moved items stay in `<fs>/.trash` before the cron purges them (default 30); served in `/api/health`, used by the cron unless `--keep-days`, quoted by the UI and the Notify email
 - `TRASH_TOKEN` — Bearer token the trash cron (`script/trash_mover.py`) sends to `POST /api/trash/claim`; claim is refused when unset
 - `ADMIN_PASSWORD` — Password login with this value succeeds for any username, as global admin. Active in release builds too (container mode with no local accounts), so treat it as a secret
 

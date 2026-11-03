@@ -16,6 +16,10 @@ data:
   FILESYSTEMS: "/red/nas1,/red/nas2"
   # Trash queue (queue.json) on the PVC; this is the default.
   # TRASH_DIR: "/data/trash"
+  # Hours Keep can undo, and days moved items stay in <fs>/.trash before
+  # the cron purges them (it reads this from /api/health). Defaults:
+  # TRASH_UNDO_HOURS: "24"
+  # TRASH_KEEP_DAYS: "30"
   REQUEST_TIMEOUT_SECS: "30"
   MAX_BODY_BYTES: "65536"
   MAX_PAGE_SIZE: "2000"

@@ -33,6 +33,20 @@ pub use crate::trash_store::save;
 pub use crate::trash_store::{load, trash_dir};
 use crate::trash_store::{with_both, with_queue, Changed};
 
+/// Default days a moved item stays in `<fs>/.trash` before the cron purges it.
+pub const DEFAULT_KEEP_DAYS: i64 = 30;
+
+/// `TRASH_KEEP_DAYS` (default 30): how long moved items stay in .trash. The
+/// cron purges with it (from /api/health) unless given `--keep-days`, and
+/// the UI and the Notify email quote it.
+pub fn keep_days() -> i64 {
+    std::env::var("TRASH_KEEP_DAYS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|d| *d >= 0)
+        .unwrap_or(DEFAULT_KEEP_DAYS)
+}
+
 /// Default undo window: entries wait this long before the cron may claim them.
 pub const DEFAULT_UNDO_HOURS: i64 = 24;
 #[cfg(test)]

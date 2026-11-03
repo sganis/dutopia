@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
 # script/trash_mover.py
-"""Dutopia nightly trash mover (Python 3 stdlib only).
+"""Dutopia nightly trash mover (Python 3 stdlib only), run as root by cron.
 
-Runs as root from cron on a node that mounts the filesystems:
+  trash_mover.py [move|purge] --api URL --token-file F --fs FS [--fs FS] [--dry-run]
 
-  0 2 * * * python3 /opt/dutopia/trash_mover.py \\
-      --api https://dutopia.apps.ocp.corp.local --token-file /etc/dutopia/trash.token
-
-Local testing (duapi started with TRASH_UNDO_HOURS=0 TRASH_TOKEN=x):
-
-  TRASH_TOKEN=x python3 script/trash_mover.py --dev --api http://localhost:8080
-
-1. POST /api/trash/claim with the token: duapi returns the items queued over
-   24h (TRASH_UNDO_HOURS) ago and drops them from its queue. The batch is saved first to
-   <state-dir>/<date>.json (rerun it with --batch if a run dies halfway).
-2. Each item is skipped if it is gone, inside .trash/.stats, reached through
-   a symlink, no longer owned by its owner, a folder holding anything of
-   another owner or another mount, owned by a system account (--min-uid), on
-   a filesystem not given with --fs, or on one not mounted on this node.
-3. Otherwise it is renamed to <fs>/.trash/<date>/<path relative to fs>
-   (instant, same filesystem); a folder is then packed into <name>.tar.zst
-   and removed. <fs>/.trash is 0700 root, next to <fs>/.stats; a .trash that
-   is a symlink or not root's is refused. Every step runs on file descriptors
-   opened with O_NOFOLLOW, so swapping a path component for a symlink while
-   the cron runs cannot redirect it.
-4. <fs>/.trash/<date> folders older than --keep-days are deleted, for every
-   filesystem seen in this or earlier batches plus each --purge FS.
-
-Exit status 1 when any item or purge failed (cron mails the output).
+move: claim the items queued over TRASH_UNDO_HOURS ago on the filesystems
+this node mounts, save the batch, move each to <fs>/.trash/<date>/<path>
+(folders as .tar.zst), report the results. Items that are gone, not their
+owner's, a folder holding other owners' files, or reached through a symlink
+are skipped (see trash_fsops.py).
+purge: delete <fs>/.trash/<date> folders older than TRASH_KEEP_DAYS.
+No command does both. Exit status 1 when anything failed. Runbook:
+deploy/TRASH.md.
 """
 import argparse
 import datetime
@@ -61,7 +45,7 @@ def call_api(api, endpoint, token=None, body=None, cafile=None, timeout=120,
     unless allow_http: replies tell root what to move."""
     url = api.rstrip("/") + "/api/" + endpoint
     if not url.startswith("https://") and not allow_http:
-        raise ValueError(f"refusing non-https API {api} (pass --allow-http to override)")
+        raise ValueError(f"refusing non-https API {api} (use https; --dev allows http for local tests)")
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -74,10 +58,14 @@ def call_api(api, endpoint, token=None, body=None, cafile=None, timeout=120,
         return (data, resp.headers) if with_headers else data
 
 
-def api_filesystems(api, cafile=None, allow_http=False):
-    """The server's FILESYSTEMS list (GET /api/health)."""
-    fss = call_api(api, "health", cafile=cafile, allow_http=allow_http).get("filesystems")
-    return [f.rstrip("/") or "/" for f in fss or []]
+def api_health(api, cafile=None, allow_http=False):
+    """GET /api/health (no token): {"filesystems": [...], "keep_days": N or None}."""
+    h = call_api(api, "health", cafile=cafile, allow_http=allow_http)
+    days = h.get("trash_keep_days")
+    return {
+        "filesystems": [f.rstrip("/") or "/" for f in h.get("filesystems") or []],
+        "keep_days": days if isinstance(days, int) and days >= 0 else None,
+    }
 
 
 def claim(api, token, cafile=None, timeout=120, allow_http=False, dry_run=False,
@@ -168,7 +156,7 @@ def seen_filesystems(state_dir):
 
 
 def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
-        allowed_fs=None, min_uid=None, dry_run=False, results=None):
+        allowed_fs=None, min_uid=None, dry_run=False, results=None, do_purge=True):
     """Move every item, then purge; return the number of failures.
     dry_run runs every check but moves and deletes nothing. Each item's
     outcome (status moved/skipped/error, detail, dest) is appended to
@@ -199,9 +187,13 @@ def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
             errors += 1
             log("err", f"{path}: {e}")
             outcome(item, "error", str(e))
+    if not do_purge:
+        return errors
     targets = seen | seen_filesystems(state_dir) | {p.rstrip("/") or "/" for p in purge_fs}
     if allowed_fs is not None:
         targets &= allowed_fs
+    if targets:
+        log("purge", f"trash older than {keep_days} day(s) on {', '.join(sorted(targets))}")
     for fs in sorted(targets):
         if check_mount and not os.path.ismount(fs):
             continue
@@ -215,38 +207,33 @@ def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--api", help="duapi base URL, e.g. https://dutopia.example")
-    ap.add_argument("--token-file", help="file holding TRASH_TOKEN (default: the TRASH_TOKEN env var)")
-    ap.add_argument("--cafile", help="CA bundle for a private-CA duapi certificate")
-    ap.add_argument("--state-dir", help=f"saved batches (default {STATE_DIR}; ~/.dutopia-trash with --dev)")
-    ap.add_argument("--keep-days", type=int, default=KEEP_DAYS, help="purge trash older than this")
-    ap.add_argument("--purge", action="append", default=[], metavar="FS",
-                    help="also purge FS/.trash (repeatable)")
-    ap.add_argument("--batch", help="process this saved batch instead of claiming")
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        epilog="Example: trash_mover.py --api https://dutopia.example --token-file "
+               "/etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2 [--dry-run]",
+    )
+    ap.add_argument("command", nargs="?", choices=["move", "purge"],
+                    help="only move, or only purge (default: both)")
+    ap.add_argument("--api", help="duapi URL (the Route)")
     ap.add_argument("--fs", action="append", metavar="FS",
-                    help="only act on these filesystems (repeatable; recommended)")
-    ap.add_argument("--min-uid", type=int, default=MIN_UID,
-                    help=f"never move items of owners below this uid (default {MIN_UID})")
-    ap.add_argument("--allow-http", action="store_true",
-                    help="accept a plain-http --api (testing only)")
-    ap.add_argument("--no-mount-check", action="store_true",
-                    help="accept filesystems that are not mount points (testing only)")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="check and report what would move or be purged; change nothing "
-                         "(the server keeps the items queued)")
+                    help="filesystem this node handles (repeat)")
+    ap.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
+    ap.add_argument("--token-file", help="file with TRASH_TOKEN (default: $TRASH_TOKEN)")
+    ap.add_argument("--keep-days", type=int, help="purge age (default: the server's TRASH_KEEP_DAYS)")
+    ap.add_argument("--batch", help="process a saved batch instead of claiming")
+    ap.add_argument("--cafile", help="CA bundle for a private-CA Route")
     ap.add_argument("--dev", action="store_true",
-                    help="local testing: --allow-http --no-mount-check --min-uid 0, "
-                         "batches in ~/.dutopia-trash")
+                    help="local test: plain http, no mount points, any uid, state in ~/.dutopia-trash")
+    ap.add_argument("--state-dir", help=argparse.SUPPRESS)  # tests and odd setups
     args = ap.parse_args(argv)
-    if args.dev:
-        args.allow_http = args.no_mount_check = True
-        args.min_uid = 0
+    args.purge_only, args.move_only = args.command == "purge", args.command == "move"
+    args.allow_http = args.no_mount_check = args.dev
+    args.min_uid = 0 if args.dev else MIN_UID
     if not args.state_dir:
         args.state_dir = os.path.expanduser("~/.dutopia-trash") if args.dev else STATE_DIR
     today = datetime.date.today()
     allowed = {f.rstrip("/") or "/" for f in args.fs} if args.fs else None
-    purge_fs = list(args.purge)
+    purge_fs = sorted(allowed or [])
 
     lock = None
     if not args.dry_run:
@@ -273,49 +260,64 @@ def read_token(args):
     return os.environ.get("TRASH_TOKEN", "").strip()
 
 
+def local_filesystems(server_fs, allowed, check_mount=True):
+    """The server's filesystems this node handles: in --fs (when given) and
+    mounted here."""
+    return [f for f in server_fs if (allowed is None or f in allowed)
+            and (not check_mount or os.path.ismount(f))]
+
+
 def work(args, ap, today, allowed, purge_fs):
-    """Claim (or load --batch), move, purge, report; return the exit code."""
+    """Claim (or load --batch) and move, then purge, then report, as the
+    command allows (move, purge, or both); return the exit code."""
     errors = 0
+    do_move, do_purge = not args.purge_only, not args.move_only
     token = read_token(args)
-    items = []
-    if args.batch:
-        with open(args.batch) as f:
-            items = json.load(f)
-    else:
-        if not args.api or not token:
-            ap.error("--api and a token (--token-file or TRASH_TOKEN) are required "
-                     "unless --batch is given")
+    if do_move and not args.batch and (not args.api or not token):
+        ap.error("moving needs --api and a token (--token-file or TRASH_TOKEN); "
+                 "`purge` needs neither")
+    server = None
+    if args.api:
         try:
-            server_fs = api_filesystems(args.api, args.cafile, args.allow_http)
+            server = api_health(args.api, args.cafile, args.allow_http)
         except Exception as e:
             # Still purge what earlier batches knew about, below.
             errors += 1
-            server_fs = None
             log("err", f"cannot read {args.api}/api/health: {e}")
-        if server_fs is not None:
-            local = []
-            if allowed is not None and not allowed & set(server_fs):
-                errors += 1
-                log("err", f"--fs {', '.join(sorted(allowed))} matches none of the server's "
-                           f"FILESYSTEMS ({', '.join(server_fs) or 'none'})")
-            else:
-                local = [f for f in server_fs if (allowed is None or f in allowed)
-                         and (args.no_mount_check or os.path.ismount(f))]
-                if not local:
-                    log("claim", f"none of the server's FILESYSTEMS ({', '.join(server_fs) or 'none'}) "
-                                 "is mounted on this node: nothing to claim")
-            purge_fs += local
-            if local:
-                got = claim_items(args, token, local, today)
-                if got is None:
-                    return 1
-                items, failed = got
-                errors += failed
+    keep_days = args.keep_days
+    if keep_days is None:
+        keep_days = server["keep_days"] if server and server["keep_days"] is not None else KEEP_DAYS
+
+    local = []
+    if server is not None:
+        server_fs = server["filesystems"]
+        if allowed is not None and not allowed & set(server_fs):
+            errors += 1
+            log("err", f"--fs {', '.join(sorted(allowed))} matches none of the server's "
+                       f"FILESYSTEMS ({', '.join(server_fs) or 'none'})")
+        else:
+            local = local_filesystems(server_fs, allowed, not args.no_mount_check)
+            if not local and do_move and not args.batch:
+                log("claim", f"none of the server's FILESYSTEMS ({', '.join(server_fs) or 'none'}) "
+                             "is mounted on this node: nothing to claim")
+        purge_fs += local
+
+    items = []
+    if do_move and args.batch:
+        with open(args.batch) as f:
+            items = json.load(f)
+    elif do_move and local:
+        got = claim_items(args, token, local, today)
+        if got is None:
+            return 1
+        items, failed = got
+        errors += failed
 
     results = []
-    errors += run(items, today, args.state_dir, args.keep_days, purge_fs,
+    errors += run(items, today, args.state_dir, keep_days, purge_fs,
                   check_mount=not args.no_mount_check, allowed_fs=allowed,
-                  min_uid=args.min_uid, dry_run=args.dry_run, results=results)
+                  min_uid=args.min_uid, dry_run=args.dry_run, results=results,
+                  do_purge=do_purge)
     if results and not args.dry_run and args.api and token:
         errors += report(args.api, token, results, args.cafile, args.allow_http)
     return 1 if errors else 0

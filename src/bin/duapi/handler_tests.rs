@@ -542,3 +542,21 @@ async fn test_health_reports_filesystems() {
     assert_eq!(v["filesystems"], serde_json::json!(["/red/nas1", "/red/nas2"]));
     unsafe { std::env::remove_var("FILESYSTEMS") };
 }
+
+#[tokio::test]
+#[serial]
+async fn test_health_reports_trash_keep_days() {
+    init_db_once();
+    let keep_days = || async {
+        let resp = health_handler().await.into_response();
+        let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["trash_keep_days"].clone()
+    };
+    unsafe { std::env::remove_var("TRASH_KEEP_DAYS") };
+    assert_eq!(keep_days().await, 30);
+    unsafe { std::env::set_var("TRASH_KEEP_DAYS", "7") };
+    assert_eq!(keep_days().await, 7);
+    unsafe { std::env::set_var("TRASH_KEEP_DAYS", "nope") };
+    assert_eq!(keep_days().await, 30);
+    unsafe { std::env::remove_var("TRASH_KEEP_DAYS") };
+}

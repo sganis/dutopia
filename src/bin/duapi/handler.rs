@@ -37,6 +37,7 @@ pub async fn health_handler() -> impl IntoResponse {
         "db_version": crate::db_version(),
         "filesystems": crate::filesystems(),
         "trash_undo_hours": crate::trash::undo_hours(),
+        "trash_keep_days": crate::trash::keep_days(),
     }))
 }
 
