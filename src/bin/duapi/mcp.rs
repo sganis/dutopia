@@ -16,7 +16,7 @@ use dutopia::auth::Claims;
 use dutopia::{analytic, db, item};
 
 use crate::query::{normalize_path, parse_users_csv};
-use crate::{get_db, get_users};
+use crate::get_users;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -296,28 +296,45 @@ fn parse_limit_arg(args: &Value, default: u32) -> Result<u32, String> {
     }
 }
 
-fn enforce_self_or_admin(claims: &Claims, requested: &[String]) -> Result<(), String> {
-    if claims.is_admin {
-        return Ok(());
+/// Non-global-admin access rule for the per-path tools: storage admins may
+/// query any users inside their assigned roots (or while navigating an
+/// ancestor of them, matching the REST handlers); outside them (and for
+/// regular users) only their own user is allowed.
+fn enforce_self_or_admin(claims: &Claims, path: &str, requested: &[String]) -> Result<(), String> {
+    match dutopia::authz::check_access(claims, path, requested) {
+        Ok(_) => Ok(()),
+        Err(_) => Err("forbidden: non-admin must request only their own user".into()),
     }
-    if requested.len() == 1 && requested[0] == claims.sub {
-        return Ok(());
-    }
-    Err("forbidden: non-admin must request only their own user".into())
 }
 
-fn require_admin(claims: &Claims) -> Result<(), String> {
+/// Cross-user analytics rule: global admin always; storage admin only when
+/// the query is scoped to a path inside their roots (`None` = whole
+/// filesystem → global admin only).
+fn require_admin_or_root(claims: &Claims, path: Option<&str>) -> Result<(), String> {
     if claims.is_admin {
-        Ok(())
-    } else {
-        Err("forbidden: admin required for cross-user analytics".into())
+        return Ok(());
     }
+    if let Some(p) = path {
+        if !claims.roots.is_empty() && dutopia::authz::path_in_roots(&claims.roots, p) {
+            return Ok(());
+        }
+    }
+    Err("forbidden: admin required for cross-user analytics".into())
 }
 
 // ---------- v1 wrappers ----------
 
+/// The DB pool, or a "no database loaded" error for the tool result.
+fn db_pool() -> Result<crate::db::DbPool, String> {
+    crate::get_db().cloned().ok_or_else(|| {
+        "no database loaded: build it with `dudb --input <csv> --output $DB_PATH` \
+         and restart the server"
+            .to_string()
+    })
+}
+
 async fn tool_list_users(claims: &Claims) -> Result<Value, String> {
-    let users = if claims.is_admin {
+    let users = if claims.is_admin || !claims.roots.is_empty() {
         get_users().clone()
     } else {
         vec![claims.sub.clone()]
@@ -329,10 +346,8 @@ async fn tool_list_folders(claims: &Claims, args: Value) -> Result<Value, String
     let path = parse_path_arg(&args, "path", false)?.unwrap_or_default();
     let users = parse_users_arg(&args)?;
     let age = parse_age_arg(&args)?;
-    if !claims.is_admin {
-        enforce_self_or_admin(claims, &users)?;
-    }
-    let pool = get_db().clone();
+    enforce_self_or_admin(claims, &path, &users)?;
+    let pool = db_pool()?;
     let users_t = users.clone();
     let path_t = path.clone();
     let res = tokio::task::spawn_blocking(move || db::list_children(&pool, &path_t, &users_t, age))
@@ -350,9 +365,7 @@ async fn tool_list_files(claims: &Claims, args: Value) -> Result<Value, String> 
     let users = parse_users_arg(&args)?;
     let age = parse_age_arg(&args)?;
     let limit = parse_limit_arg(&args, crate::query::max_page_size() as u32)? as usize;
-    if !claims.is_admin {
-        enforce_self_or_admin(claims, &users)?;
-    }
+    enforce_self_or_admin(claims, &path, &users)?;
     let users_t = users.clone();
     let path_t = path.clone();
     // Nothing for `dudb --no-files`; snapshot DB when `dudb --raw` populated
@@ -362,7 +375,7 @@ async fn tool_list_files(claims: &Claims, args: Value) -> Result<Value, String> 
         return serde_json::to_value(item::FilesOut::default()).map_err(|e| format!("serialize: {e}"));
     }
     if crate::files_indexed() {
-        let pool = get_db().clone();
+        let pool = db_pool()?;
         let limit = crate::files_limit(limit);
         let items = tokio::task::spawn_blocking(move || {
             db::list_files(&pool, &path_t, &users_t, age, limit)
@@ -382,10 +395,10 @@ async fn tool_list_files(claims: &Claims, args: Value) -> Result<Value, String> 
 // ---------- Analytics wrappers (admin only for cross-user aggregates) ----------
 
 async fn tool_top_consumers(claims: &Claims, args: Value) -> Result<Value, String> {
-    require_admin(claims)?;
     let path = parse_path_arg(&args, "path", false)?;
+    require_admin_or_root(claims, path.as_deref())?;
     let limit = parse_limit_arg(&args, 10)?;
-    let pool = get_db().clone();
+    let pool = db_pool()?;
     let res = tokio::task::spawn_blocking(move || analytic::top_consumers(&pool, path.as_deref(), limit))
         .await
         .map_err(|e| format!("join: {e}"))?
@@ -394,10 +407,10 @@ async fn tool_top_consumers(claims: &Claims, args: Value) -> Result<Value, Strin
 }
 
 async fn tool_largest_folders(claims: &Claims, args: Value) -> Result<Value, String> {
-    require_admin(claims)?;
     let path = parse_path_arg(&args, "path", false)?;
+    require_admin_or_root(claims, path.as_deref())?;
     let limit = parse_limit_arg(&args, 10)?;
-    let pool = get_db().clone();
+    let pool = db_pool()?;
     let res = tokio::task::spawn_blocking(move || analytic::largest_folders(&pool, path.as_deref(), limit))
         .await
         .map_err(|e| format!("join: {e}"))?
@@ -406,10 +419,10 @@ async fn tool_largest_folders(claims: &Claims, args: Value) -> Result<Value, Str
 }
 
 async fn tool_cold_data(claims: &Claims, args: Value) -> Result<Value, String> {
-    require_admin(claims)?;
     let path = parse_path_arg(&args, "path", false)?;
+    require_admin_or_root(claims, path.as_deref())?;
     let limit = parse_limit_arg(&args, 50)?;
-    let pool = get_db().clone();
+    let pool = db_pool()?;
     let res = tokio::task::spawn_blocking(move || analytic::cold_data(&pool, path.as_deref(), limit))
         .await
         .map_err(|e| format!("join: {e}"))?
@@ -421,10 +434,8 @@ async fn tool_summary(claims: &Claims, args: Value) -> Result<Value, String> {
     let path = parse_path_arg(&args, "path", false)?;
     let users = parse_users_arg(&args)?;
     let age = parse_age_arg(&args)?;
-    if !claims.is_admin {
-        enforce_self_or_admin(claims, &users)?;
-    }
-    let pool = get_db().clone();
+    enforce_self_or_admin(claims, path.as_deref().unwrap_or(""), &users)?;
+    let pool = db_pool()?;
     let users_t = users.clone();
     let res = tokio::task::spawn_blocking(move || analytic::summary(&pool, path.as_deref(), &users_t, age))
         .await
@@ -448,16 +459,16 @@ mod tests {
         let users = dutopia::db::list_users(&pool).expect("list_users");
         let files_indexed = dutopia::db::has_files(&pool).expect("has_files");
         let _ = TEST_DB.set(temp_db);
-        let _ = DB_POOL.set(pool);
+        let _ = DB_POOL.set(Some(pool));
         let _ = USERS.set(users);
         let _ = FILES_INDEXED.set(files_indexed);
     }
 
     fn admin() -> Claims {
-        Claims { sub: "root".into(), is_admin: true, exp: 9_999_999_999usize }
+        Claims { sub: "root".into(), is_admin: true, roots: vec![], exp: 9_999_999_999usize }
     }
     fn alice() -> Claims {
-        Claims { sub: "alice".into(), is_admin: false, exp: 9_999_999_999usize }
+        Claims { sub: "alice".into(), is_admin: false, roots: vec![], exp: 9_999_999_999usize }
     }
 
     #[test]
@@ -637,5 +648,79 @@ mod tests {
         assert_eq!(v["isError"], false);
         assert!(v["structuredContent"].is_array());
         assert!(v["content"][0]["type"] == "text");
+    }
+
+    // ---- storage-admin scoping ----
+
+    fn storage_admin() -> Claims {
+        Claims {
+            sub: "user1".into(),
+            is_admin: false,
+            roots: vec!["/docs".into()],
+            exp: 9_999_999_999usize,
+        }
+    }
+
+    #[test]
+    fn enforce_self_or_admin_scopes_storage_admin_to_roots() {
+        let sa = storage_admin();
+        // Inside root: any users allowed.
+        assert!(enforce_self_or_admin(&sa, "/docs", &[]).is_ok());
+        assert!(enforce_self_or_admin(&sa, "/docs/sub", &["other".into()]).is_ok());
+        // Ancestor of root (navigation): allowed with any users.
+        assert!(enforce_self_or_admin(&sa, "/", &[]).is_ok());
+        assert!(enforce_self_or_admin(&sa, "/", &["other".into()]).is_ok());
+        // Off-route sibling: self-only.
+        assert!(enforce_self_or_admin(&sa, "/opt", &["user1".into()]).is_ok());
+        assert!(enforce_self_or_admin(&sa, "/opt", &[]).is_err());
+        assert!(enforce_self_or_admin(&sa, "/opt", &["other".into()]).is_err());
+        // Prefix trap.
+        assert!(enforce_self_or_admin(&sa, "/docs-sub", &["other".into()]).is_err());
+    }
+
+    #[test]
+    fn require_admin_or_root_scopes_analytics() {
+        let sa = storage_admin();
+        // Global admin: always allowed.
+        assert!(require_admin_or_root(&admin(), None).is_ok());
+        // Storage admin: only inside roots, explicit path required.
+        assert!(require_admin_or_root(&sa, Some("/docs")).is_ok());
+        assert!(require_admin_or_root(&sa, Some("/docs/x")).is_ok());
+        assert!(require_admin_or_root(&sa, None).is_err());
+        assert!(require_admin_or_root(&sa, Some("/")).is_err());
+        assert!(require_admin_or_root(&sa, Some("/docs-sub")).is_err());
+        // Regular user: never.
+        assert!(require_admin_or_root(&alice(), Some("/docs")).is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_users_storage_admin_gets_full_list() {
+        init_db_once();
+        let v = tool_list_users(&storage_admin()).await.unwrap();
+        let arr = v.as_array().unwrap();
+        assert!(arr.iter().any(|u| u == "alice"));
+        assert!(arr.iter().any(|u| u == "bob"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_folders_storage_admin_scoped() {
+        init_db_once();
+        let sa = storage_admin();
+        // Inside root without user filter: allowed (full admin view).
+        let args = json!({ "path": "/docs" });
+        assert!(tool_list_folders(&sa, args).await.is_ok());
+        // Ancestor of root without user filter: allowed (navigable; the
+        // result is filtered to the route into the roots).
+        let args = json!({ "path": "/" });
+        assert!(tool_list_folders(&sa, args).await.is_ok());
+        // Off-route sibling without user filter: forbidden.
+        let args = json!({ "path": "/opt" });
+        let err = tool_list_folders(&sa, args).await.unwrap_err();
+        assert!(err.contains("forbidden"));
+        // Off-route sibling with self: allowed.
+        let args = json!({ "path": "/opt", "users": ["user1"] });
+        assert!(tool_list_folders(&sa, args).await.is_ok());
     }
 }

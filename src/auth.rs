@@ -110,13 +110,22 @@ impl IntoResponse for AuthError {
 pub struct Claims {
     pub sub: String,
     pub is_admin: bool,
+    /// Storage-admin roots: full admin inside each, self-only outside.
+    /// Empty for global admins (where it's ignored) and regular users.
+    /// `default` so pre-storage-admin JWTs without the field still decode.
+    #[serde(default)]
+    pub roots: Vec<String>,
     pub exp: usize,
 }
 
 // allow us to print the claim details for the private route
 impl Display for Claims {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "username: {}\nis_admin: {}", self.sub, self.is_admin)
+        write!(
+            f,
+            "username: {}\nis_admin: {}\nroots: {:?}",
+            self.sub, self.is_admin, self.roots
+        )
     }
 }
 
@@ -162,16 +171,14 @@ pub struct VerifyResult {
     pub admin_override: bool,
 }
 
-/// Verify credentials with an optional test-mode bypass.
+/// Verify credentials with an optional admin bypass.
 ///
-/// In debug builds and in test harnesses, if the `ADMIN_PASSWORD` env var is
-/// set to a non-empty value and the supplied password matches it,
-/// authentication succeeds for any username *and* the returned result carries
-/// `admin_override = true`. The bypass is compiled out entirely in release
-/// builds (gated on `cfg(any(debug_assertions, test))`) so a leaked env var
-/// on a production deployment cannot grant admin.
+/// If the `ADMIN_PASSWORD` env var is set to a non-empty value and the
+/// supplied password matches it, authentication succeeds for any username
+/// *and* the returned result carries `admin_override = true`. This is the
+/// container deployment mode: no local accounts on the API host, no IdP
+/// reachability required.
 pub fn verify_credentials(username: &str, password: &str) -> VerifyResult {
-    #[cfg(any(debug_assertions, test))]
     {
         if let Ok(expected) = std::env::var("ADMIN_PASSWORD") {
             if !expected.is_empty() && password == expected {
@@ -182,10 +189,6 @@ pub fn verify_credentials(username: &str, password: &str) -> VerifyResult {
                 };
             }
         }
-    }
-    #[cfg(not(any(debug_assertions, test)))]
-    {
-        let _ = username; // kept for symmetry with debug path
     }
     VerifyResult {
         authenticated: platform::verify_user(username, password),

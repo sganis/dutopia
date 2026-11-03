@@ -26,6 +26,7 @@
     const claims = parseJwt(token);
     State.username = claims?.sub || '';
     State.isAdmin = !!claims?.is_admin;
+    State.roots = claims?.roots ?? [];
     State.token = token;
     State.expiresAt = claims?.exp ? claims.exp * 1000 : null;
     try { localStorage.setItem('state', JSON.stringify(State)); } catch {}

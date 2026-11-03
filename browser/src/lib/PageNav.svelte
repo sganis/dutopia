@@ -24,6 +24,7 @@
   export let goForward: () => void;
   export let goUp: () => void;
   export let onUserChanged: () => void;
+  export let onUserEnterKey: (e: KeyboardEvent) => void;
   export let onAgeChanged: () => void;
   export let onPathKeydown: (e: KeyboardEvent) => void;
   export let onPathBlur: () => void;
@@ -66,6 +67,7 @@
     renderer="color"
     highlightFirstItem={false}
     onChange={onUserChanged}
+    onEnterKey={onUserEnterKey}
     closeAfterSelect={true}
     deselectMode="native"
     virtualList={true}

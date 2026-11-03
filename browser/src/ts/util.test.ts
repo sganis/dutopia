@@ -1,6 +1,6 @@
 // browser/src/ts/util.test.ts
 import { describe, it, expect } from 'vitest';
-import { humanBytes, humanCount, escapeHtml, getParent, capitalize } from './util';
+import { humanBytes, humanCount, escapeHtml, getParent, capitalize, matchOption } from './util';
 
 describe('humanBytes', () => {
   it('returns "0 B" for zero / falsy input', () => {
@@ -97,5 +97,36 @@ describe('capitalize', () => {
   it('returns "" for falsy input', () => {
     expect(capitalize('')).toBe('');
     expect(capitalize(null as any)).toBe('');
+  });
+});
+
+describe('matchOption', () => {
+  const users = [
+    { user: 'All Users', color: '' },
+    { user: 'alice', color: '#f00' },
+    { user: 'Alice02', color: '#0f0' },
+    { user: 'bob', color: '#00f' },
+  ];
+  const label = (o: { user: string }) => o.user;
+
+  it('exact match wins even when prefixes collide', () => {
+    expect(matchOption('alice', users, label)).toBe(users[1]);
+    expect(matchOption('ALICE', users, label)).toBe(users[1]);
+  });
+
+  it('unique prefix selects the prefixed option', () => {
+    expect(matchOption('bo', users, label)).toBe(users[3]);
+    expect(matchOption('al', users, label)).toBeNull(); // ambiguous: alice / Alice02 / All Users
+  });
+
+  it('is null for no match, empty text, or empty options', () => {
+    expect(matchOption('carol', users, label)).toBeNull();
+    expect(matchOption('', users, label)).toBeNull();
+    expect(matchOption(null as any, users, label)).toBeNull();
+    expect(matchOption('a', [], label)).toBeNull();
+  });
+
+  it('trims surrounding whitespace and ignores case', () => {
+    expect(matchOption('  Bob  ', users, label)).toBe(users[3]);
   });
 });

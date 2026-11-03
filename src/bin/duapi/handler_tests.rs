@@ -4,7 +4,7 @@ use axum::body::to_bytes;
 use axum::extract::Query;
 use serial_test::serial;
 
-use crate::{DB_POOL, FILES_INDEXED, TEST_DB, USERS};
+use crate::{DB_POOL, DB_VERSION, FILES_INDEXED, TEST_DB, USERS};
 use dutopia::db::FolderOut;
 use dutopia::item::FilesOut;
 
@@ -18,12 +18,14 @@ fn init_db_once() {
     let pool = dutopia::db::open_pool(&temp_db.path).expect("open_pool");
     let users = dutopia::db::list_users(&pool).expect("list_users");
     let files_indexed = dutopia::db::has_files(&pool).expect("has_files");
+    let db_version = dutopia::db::built_at(&pool).expect("built_at");
     // Keep the TempDb alive for the entire test run so the file is not
     // removed while the pool is still using it.
     let _ = TEST_DB.set(temp_db);
-    let _ = DB_POOL.set(pool);
+    let _ = DB_POOL.set(Some(pool));
     let _ = USERS.set(users);
     let _ = FILES_INDEXED.set(files_indexed);
+    let _ = DB_VERSION.set(db_version);
 }
 
 #[tokio::test]
@@ -33,7 +35,8 @@ async fn test_users_handler_admin_and_user() {
     let admin = Claims {
         sub: "root".to_string(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let resp_admin = users_handler(admin).await.into_response();
     assert_eq!(resp_admin.status(), StatusCode::OK);
@@ -47,7 +50,8 @@ async fn test_users_handler_admin_and_user() {
     let user = Claims {
         sub: "alice".to_string(),
         is_admin: false,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let resp_user = users_handler(user).await.into_response();
     let body = to_bytes(resp_user.into_body(), TEST_BODY_LIMIT)
@@ -65,7 +69,8 @@ async fn test_get_folders_handler_authz_and_filters() {
     let non_admin = Claims {
         sub: "alice".into(),
         is_admin: false,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q_all = FolderQuery {
         path: Some("/".into()),
@@ -93,7 +98,8 @@ async fn test_get_folders_handler_authz_and_filters() {
     let admin = Claims {
         sub: "root".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q_admin_all = FolderQuery {
         path: Some("/".into()),
@@ -116,7 +122,8 @@ async fn test_get_files_handler_bad_path() {
     let claims = Claims {
         sub: "any".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q = FilesQuery {
         path: None,
@@ -132,7 +139,8 @@ async fn test_get_folders_handler_rejects_traversal() {
     let claims = Claims {
         sub: "root".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q = FolderQuery {
         path: Some("/var/../etc/passwd".into()),
@@ -148,7 +156,8 @@ async fn test_get_files_handler_rejects_traversal() {
     let claims = Claims {
         sub: "root".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q = FilesQuery {
         path: Some("/var/../etc/passwd".into()),
@@ -166,7 +175,8 @@ async fn test_get_files_handler_db_admin_ok() {
     let claims = Claims {
         sub: "root".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q = FilesQuery {
         path: Some("/docs".into()),
@@ -189,7 +199,8 @@ async fn test_get_files_handler_db_filters() {
     let claims = Claims {
         sub: "alice".into(),
         is_admin: false,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     // Non-admin restricted to self: only alice's files come back.
     let q = FilesQuery {
@@ -214,7 +225,8 @@ async fn test_get_files_handler_clamps_to_max_page_size() {
     let claims = Claims {
         sub: "root".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q = FilesQuery {
         path: Some("/docs".into()),
@@ -234,7 +246,8 @@ async fn test_get_files_handler_non_admin_forbidden() {
     let claims = Claims {
         sub: "alice".into(),
         is_admin: false,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     // No user filter: rejected before any DB or filesystem access.
     let q = FilesQuery {
@@ -267,7 +280,7 @@ async fn test_login_missing_credentials() {
 #[serial]
 async fn test_list_children_filters_and_ages() {
     init_db_once();
-    let pool = DB_POOL.get().unwrap();
+    let pool = DB_POOL.get().unwrap().as_ref().unwrap();
 
     let items = dutopia::db::list_children(pool, "/", &[], None).unwrap();
     assert!(items.iter().any(|it| it.path == "/docs"));
@@ -291,13 +304,18 @@ async fn test_list_children_filters_and_ages() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_health_handler() {
+    init_db_once();
     let resp = health_handler().await.into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "ok");
     assert!(v["smtp_configured"].is_boolean());
+    // Present (non-null) once the test DB is loaded: dudb writes built_at,
+    // so the browser has a version to key its cache on.
+    assert!(v["db_version"].is_string());
 }
 
 #[tokio::test]
@@ -309,7 +327,8 @@ async fn test_get_folders_handler_clamps_to_max_page_size() {
     let admin = Claims {
         sub: "root".into(),
         is_admin: true,
-        exp: 9_999_999_999usize,
+        roots: vec![],
+            exp: 9_999_999_999usize,
     };
     let q = FolderQuery {
         path: Some("/".into()),
@@ -322,4 +341,135 @@ async fn test_get_folders_handler_clamps_to_max_page_size() {
     let arr: Vec<FolderOut> = serde_json::from_slice(&body).unwrap();
     assert!(arr.len() <= 1);
     unsafe { std::env::remove_var("MAX_PAGE_SIZE") };
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_folders_handler_storage_admin_scoped() {
+    init_db_once();
+
+    let sa = Claims {
+        sub: "user1".into(),
+        is_admin: false,
+        roots: vec!["/docs".into()],
+        exp: 9_999_999_999usize,
+    };
+
+    // Inside root: no users filter needed (full admin view).
+    let q = FolderQuery {
+        path: Some("/docs".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_folders_handler(sa.clone(), Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Ancestor of root (SPA navigation): allowed, children filtered to the
+    // route into the roots.
+    let q = FolderQuery {
+        path: Some("/".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_folders_handler(sa.clone(), Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+    let arr: Vec<FolderOut> = serde_json::from_slice(&body).unwrap();
+    // Only the next hop towards the root survives; unrelated top-level
+    // folders are dropped.
+    assert!(arr.iter().all(|it| it.path == "/docs" || it.path.starts_with("/docs/")));
+
+    // Off-route sibling: forbidden.
+    let q = FolderQuery {
+        path: Some("/opt".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_folders_handler(sa.clone(), Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // …but users=self is allowed anywhere (regular-user fallback).
+    let q = FolderQuery {
+        path: Some("/opt".into()),
+        users: Some("user1".into()),
+        age: None,
+    };
+    let resp = get_folders_handler(sa.clone(), Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Prefix trap: /docs-sub is NOT inside root /docs.
+    let q = FolderQuery {
+        path: Some("/docs-sub".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_folders_handler(sa, Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_files_handler_storage_admin_scoped() {
+    init_db_once();
+
+    let sa = Claims {
+        sub: "user1".into(),
+        is_admin: false,
+        roots: vec!["/docs".into()],
+        exp: 9_999_999_999usize,
+    };
+
+    let q = FilesQuery {
+        path: Some("/docs".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_files_handler(sa.clone(), Query(q)).await.into_response();
+    if crate::files_disabled() {
+        // --no-files DB: handler short-circuits after the authz check.
+        assert_eq!(resp.status(), StatusCode::OK);
+    } else {
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // The SPA never calls /api/files for the root ('' or '/'), and the
+    // handler rejects those paths before authz — unchanged behavior. The
+    // navigable-files branch (empty listing for a real intermediate folder
+    // above the root) is covered by check_access unit tests plus the
+    // /api/folders test above, since the test DB has no deeper nesting.
+
+    // Off-route sibling: forbidden.
+    let q = FilesQuery {
+        path: Some("/opt".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_files_handler(sa.clone(), Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let q = FilesQuery {
+        path: Some("/".into()),
+        users: None,
+        age: None,
+    };
+    let resp = get_files_handler(sa, Query(q)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST); // '/' rejected before authz
+}
+
+#[tokio::test]
+#[serial]
+async fn test_users_handler_storage_admin_gets_full_list() {
+    init_db_once();
+    let sa = Claims {
+        sub: "user1".into(),
+        is_admin: false,
+        roots: vec!["/docs".into()],
+        exp: 9_999_999_999usize,
+    };
+    let resp = users_handler(sa).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+    let list: Vec<String> = serde_json::from_slice(&body).unwrap();
+    assert!(list.contains(&"alice".to_string()));
+    assert!(list.contains(&"bob".to_string()));
 }

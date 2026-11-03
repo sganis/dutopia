@@ -76,10 +76,12 @@ fn normalize_folder(f: &[u8], sep: u8) -> Option<Vec<u8>> {
     Some(current)
 }
 
-/// Must match `dusum::aggregate::separator`: a backslash anywhere (or a drive
-/// prefix) means Windows-native; otherwise Unix.
+/// Must match `dusum::aggregate::separator`: only the path PREFIX decides —
+/// `\\srv\share` (UNC) or `C:\…` (drive letter) is Windows-native; otherwise
+/// Unix, and a backslash in the middle is just part of a (weird but legal)
+/// Linux directory name, e.g. dirs literally named `J:\EVENT02_data\…`.
 fn separator(path: &[u8]) -> u8 {
-    if memchr::memchr(b'\\', path).is_some() {
+    if path.starts_with(b"\\\\") {
         return b'\\';
     }
     if path.len() >= 2 && path[0].is_ascii_alphabetic() && path[1] == b':' {
@@ -120,6 +122,26 @@ mod tests {
         let (f, n) = split_folder_name(b"/a/b/f.txt").unwrap();
         assert!(matches!(f, Cow::Borrowed(_)));
         assert!(matches!(n, Cow::Borrowed(_)));
+    }
+
+    /// Regression: Linux dirs whose NAME contains backslashes (Windows tools
+    /// writing Windows paths as literal dir names on a Linux FS) must stay
+    /// Unix-split, matching dusum's prefix-based separator — the old
+    /// any-backslash rule looked up `…/input/J:\EVENT02_data\2022\…` as the
+    /// folder and missed the dusum path cache for every file under it.
+    #[test]
+    fn split_folder_name_unix_with_backslash_dirname() {
+        let (folder, name) = split_folder_name(
+            b"/red/nas10/EVENT02_data.delete/2022/00_SWIFT/folder/PROPERTIES/\
+              input/J:\\EVENT02_data\\2022\\00_SWIFT\\folder\\PROPERTIES/tape.log",
+        )
+        .unwrap();
+        assert_eq!(
+            folder,
+            "/red/nas10/EVENT02_data.delete/2022/00_SWIFT/folder/PROPERTIES/\
+             input/J:\\EVENT02_data\\2022\\00_SWIFT\\folder\\PROPERTIES"
+        );
+        assert_eq!(name, "tape.log");
     }
 
     #[test]

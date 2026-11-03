@@ -1,10 +1,9 @@
 // browser/src/ts/api.web.svelte.ts
 import { State, API_URL } from "./store.svelte";
-import { getCache, setCache } from './cache.js';
-import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile } from "./models";
+import { fetchCached, initDbVersion } from './cache.js';
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
+type ScannedFile = { path: string; size: number; modified: string; owner: string };
 export type RawFolder = { path: string; users: Record<string, Record<'0'|'1'|'2', AgeMini>> };
 
 // Types also consumed by desktop-only components (ScanPanel). Exported here
@@ -51,11 +50,16 @@ class Api {
         options.body = JSON.stringify(body);
 
       if (use_cache) {
-        let data = await getCache(endpoint);
-        if (data) {
-          return data
-        }
+        // Stale-while-revalidate with in-flight dedup; see cache.ts.
+        return fetchCached<T>({
+          url: `${this.baseUrl}${endpoint}`,
+          init: options,
+          key: endpoint,
+          onError: (msg) => { this.error = msg; },
+          onAuthFailure: () => State.logout(),
+        });
       }
+
       const url = `${this.baseUrl}${endpoint}`
       const response = await fetch(url, options);
       const data: T = await response.json();
@@ -69,7 +73,6 @@ class Api {
         this.error = (data as any).detail || "Unknown API error";
         return null;
       }
-      await setCache(endpoint, data)
       return data;
     } catch (err) {
       this.error = "API: Error in fetching data.";
@@ -91,20 +94,21 @@ class Api {
     return result ?? []
   }
 
-  async getFiles(path: string, users: string[], age?: number): Promise<FilesResult> {
+  async getFiles(path: string, users: string[], age?: number): Promise<ScannedFile[]> {
     const pathParam = `path=${encodeURIComponent(path)}`
     const userParam = users.length > 0 ? `&users=${encodeURIComponent(users.join(','))}` : ''
     const ageParam = age !== undefined && age !== -1 ? `&age=${age}` : ''
     const url = `files?${pathParam}${userParam}${ageParam}`
-    const result = await this.request<FilesResult | ScannedFile[]>(url, "GET", undefined, true)
-    // A bare array is a pre-totals response (old server or cache entry).
-    if (Array.isArray(result)) return filesResultFrom(result)
-    return result ?? { files: [], totals: {} }
+    // /api/files returns FilesOut { files, totals }, not a bare array.
+    let result = await this.request<{ files?: ScannedFile[] }>(url, "GET", undefined, true)
+    return result?.files ?? []
   }
 
   /** One-shot probe of /api/health. Caches the smtp_configured flag on the
    *  Api instance so the cleanup panel can gate the Notify button without
-   *  calling /health on every render. */
+   *  calling /health on every render. Also seeds the cache's DB version
+   *  (initDbVersion wipes the store when the DB was rebuilt), so it must run
+   *  before the first cached request of a session. */
   async probeHealth(): Promise<void> {
     try {
       const resp = await fetch(`${this.baseUrl}health`, {
@@ -113,8 +117,9 @@ class Api {
       if (!resp.ok) return;
       const data = await resp.json();
       this.smtpConfigured = !!data?.smtp_configured;
+      await initDbVersion(typeof data?.db_version === 'string' ? data.db_version : null);
     } catch {
-      /* network hiccup — leave smtpConfigured at previous value */
+      /* network hiccup — leave smtpConfigured and the version at previous values */
     }
   }
 

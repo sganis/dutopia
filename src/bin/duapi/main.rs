@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 use axum::{
     http::{Method, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -33,7 +33,7 @@ mod shutdown;
 use db::DbPool;
 use handler::{get_files_handler, get_folders_handler, health_handler, login_handler, users_handler};
 
-static DB_POOL: OnceLock<DbPool> = OnceLock::new();
+static DB_POOL: OnceLock<Option<DbPool>> = OnceLock::new();
 static USERS: OnceLock<Vec<String>> = OnceLock::new();
 /// Whether the DB carries per-file rows (`dudb --raw`); probed once at
 /// startup. When false, /api/files falls back to the live filesystem.
@@ -42,6 +42,9 @@ static FILES_INDEXED: OnceLock<bool> = OnceLock::new();
 static FILES_CAP: OnceLock<usize> = OnceLock::new();
 /// DB built with `dudb --no-files`: /api/files lists nothing, never the disk.
 static FILES_DISABLED: OnceLock<bool> = OnceLock::new();
+/// DB build version (`metadata.built_at`), probed once at startup. None when
+/// the server booted without a usable DB — clients fall back to TTL expiry.
+static DB_VERSION: OnceLock<Option<String>> = OnceLock::new();
 
 #[cfg(test)]
 static TEST_DB: OnceLock<db::test_support::TempDb> = OnceLock::new();
@@ -70,9 +73,15 @@ Authentication:
   against the host's local accounts (Linux: su/PAM, macOS: dscl). It needs
   no certificates and no OIDC configuration.
 
-  ADMIN_GROUP             Comma-separated names granted admin. Matches the
-                          username on local logins; matches the username or
-                          any Keycloak group/realm-role on OIDC logins.
+  GLOBAL_ADMINS           Comma-separated names granted global admin.
+                          Matches the username on local logins; matches the
+                          username or any Keycloak group/realm-role on OIDC
+                          logins. ADMIN_GROUP (deprecated) is honored as a
+                          fallback.
+  STORAGE_ADMINS          Semi-colon-separated storage admins with scoped
+                          roots, e.g. "user1:/red/peddn7,/red/peddn8;user2:
+                          /red/ssd". Full admin inside each root, self-only
+                          outside.
   ADMIN_PASSWORD          Debug/test builds only: this password logs any
                           username in as admin. Compiled out of release
                           builds, where it is ignored.
@@ -187,18 +196,27 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    match std::env::var("ADMIN_GROUP") {
+    let admins = std::env::var("GLOBAL_ADMINS")
+        .or_else(|_| std::env::var("ADMIN_GROUP")); // deprecated name
+    match admins {
         Ok(g) => {
-            println!("ADMIN_GROUP={g}");
+            println!("GLOBAL_ADMINS={g}");
         }
         Err(_) => {
-            eprintln!("{}", "Warning: ADMIN_GROUP env var is not set.".yellow());
+            eprintln!("{}", "Warning: GLOBAL_ADMINS env var is not set.".yellow());
         }
     }
+    if let Ok(sa) = std::env::var("STORAGE_ADMINS") {
+        println!("STORAGE_ADMINS={sa}");
+    }
 
+    // OIDC is optional: a broken/unreachable IdP must not take the server
+    // down (password auth still works). Warn and serve password-only.
     if let Err(e) = oidc::init().await {
-        eprintln!("{}", format!("FATAL: OIDC init failed: {e:#}").red());
-        std::process::exit(1);
+        eprintln!(
+            "{}",
+            format!("Warning: OIDC init failed, password auth only: {e:#}").yellow()
+        );
     }
     println!(
         "Auth mode: password{}",
@@ -206,19 +224,40 @@ async fn main() -> Result<()> {
     );
 
     println!("Opening database: {}", db_path.display());
-    let pool = db::open_pool(&db_path).with_context(|| {
-        format!(
-            "opening DB at {}. Build it first with `dudb --input <csv> --output {}`",
-            db_path.display(),
-            db_path.display()
-        )
-    })?;
-    let users = db::list_users(&pool).context("loading user list")?;
+    // A missing or incompatible DB is not fatal: the server still boots and
+    // serves the SPA, login and health, while DB-backed endpoints return 503
+    // (see db_ready). This keeps containers alive on first deploy, before a
+    // DB has been built, instead of crash-looping.
+    let (pool, users) = match db::open_pool(&db_path) {
+        Ok(p) => {
+            let users = db::list_users(&p).context("loading user list")?;
+            (Some(p), users)
+        }
+        Err(e) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "Warning: {} — serving without a DB. Build it first with \
+                     `dudb --input <csv> --output {}`; DB endpoints return 503 until then.",
+                    e, db_path.display()
+                )
+                .yellow()
+            );
+            (None, Vec::new())
+        }
+    };
+    let files_indexed = pool
+        .as_ref()
+        .map(|p| db::has_files(p).unwrap_or(false))
+        .unwrap_or(false);
     println!("Loaded {} users", users.len());
 
-    let files_indexed = db::has_files(&pool).unwrap_or(false);
-    let files_cap = db::files_cap(&pool).unwrap_or(0);
-    let files_disabled = db::no_files(&pool).unwrap_or(false);
+    let files_cap = pool.as_ref().map(|p| db::files_cap(p).unwrap_or(0)).unwrap_or(0);
+    let files_disabled = pool.as_ref().map(|p| db::no_files(p).unwrap_or(false)).unwrap_or(false);
+    let db_version = pool
+        .as_ref()
+        .map(|p| db::built_at(p).ok().flatten())
+        .flatten();
     if files_disabled {
         println!("File index: none (dudb --no-files; /api/files lists no files)");
     } else if files_indexed {
@@ -240,6 +279,8 @@ async fn main() -> Result<()> {
     let _ = FILES_INDEXED.set(files_indexed);
     let _ = FILES_CAP.set(files_cap);
     let _ = FILES_DISABLED.set(files_disabled);
+    let _ = DB_VERSION.set(db_version.clone());
+    println!("DB version: {}", db_version.as_deref().unwrap_or("none"));
 
     if DB_POOL.set(pool).is_err() {
         eprintln!("{}", "FATAL: DB_POOL already initialized".red());
@@ -433,8 +474,22 @@ fn default_static_dir() -> String {
     static_dir.to_string_lossy().into_owned()
 }
 
-pub fn get_db() -> &'static DbPool {
-    DB_POOL.get().expect("DB pool not initialized")
+pub fn get_db() -> Option<&'static DbPool> {
+    DB_POOL.get().and_then(|p| p.as_ref())
+}
+
+/// Error response for DB-backed endpoints when the server booted without a
+/// usable DB (missing file or wrong schema): the server is up, the data is
+/// not. 503 with the remediation, so a monitoring probe or user sees the
+/// exact next step instead of a crashed container.
+pub fn db_unavailable() -> Response {
+    tracing::error!("503 Service Unavailable: no usable DB loaded");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no database loaded: build it with `dudb --input <csv> --output $DB_PATH` \
+         and restart the server",
+    )
+        .into_response()
 }
 
 pub fn get_users() -> &'static Vec<String> {
@@ -449,6 +504,12 @@ pub fn files_indexed() -> bool {
 /// Unset (tests that skip DB init) means files are not disabled.
 pub fn files_disabled() -> bool {
     FILES_DISABLED.get().copied().unwrap_or(false)
+}
+
+/// The DB build version (`metadata.built_at`); None when unset (tests that
+/// skip DB init) or when the server booted without a usable DB.
+pub fn db_version() -> Option<&'static str> {
+    DB_VERSION.get().and_then(|v| v.as_deref())
 }
 
 /// Page size for a file listing served from the DB index: never above the
@@ -474,6 +535,19 @@ mod tests {
         assert_eq!(clamp_to_cap(2000, 0), 2000);
         assert_eq!(clamp_to_cap(2000, 1000), 1000);
         assert_eq!(clamp_to_cap(10, 1000), 10);
+    }
+
+    #[test]
+    fn test_db_version_accessor_shape() {
+        // The accessor is `get().and_then(deref)`: None for an unset static
+        // (tests that skip DB init / server booted without a DB), Some only
+        // when a non-empty version was probed. Handler tests may have set
+        // DB_VERSION via init_db_once() before this runs, so the unset case
+        // is only checked when the static is still empty.
+        match DB_VERSION.get() {
+            None => assert!(db_version().is_none()),
+            Some(v) => assert_eq!(db_version(), v.as_deref()),
+        }
     }
 
     #[test]

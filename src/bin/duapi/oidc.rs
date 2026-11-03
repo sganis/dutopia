@@ -258,6 +258,7 @@ pub async fn verify_bearer(token: String) -> Option<Claims> {
         .to_string();
 
     let is_admin = compute_is_admin(&username, &data.claims.extra);
+    let roots = dutopia::authz::roots_for(&username);
 
     let exp = data
         .claims
@@ -269,22 +270,25 @@ pub async fn verify_bearer(token: String) -> Option<Claims> {
     Some(Claims {
         sub: username,
         is_admin,
+        roots,
         exp,
     })
 }
 
 /// `is_admin` decision for an OIDC-authenticated caller.
 ///
-/// `ADMIN_GROUP` is comma-separated and matches case-insensitively against
-/// **either** the username **or** any entry in the token's `groups` claim.
-/// Keycloak emits realm roles (e.g. `NeosMax`, `NeosPro`) as the `groups`
-/// claim, so a value like `ADMIN_GROUP=NeosMax` makes anyone holding that
-/// realm role an admin in duapi without per-user maintenance.
+/// `GLOBAL_ADMINS` (legacy name `ADMIN_GROUP`) is comma-separated and matches
+/// case-insensitively against **either** the username **or** any entry in the
+/// token's `groups` claim. Keycloak emits realm roles (e.g. `NeosMax`,
+/// `NeosPro`) as the `groups` claim, so a value like
+/// `GLOBAL_ADMINS=NeosMax` makes anyone holding that realm role an admin in
+/// duapi without per-user maintenance.
 fn compute_is_admin(
     username: &str,
     extra: &HashMap<String, serde_json::Value>,
 ) -> bool {
-    let admins: HashSet<String> = std::env::var("ADMIN_GROUP")
+    let admins: HashSet<String> = std::env::var("GLOBAL_ADMINS")
+        .or_else(|_| std::env::var("ADMIN_GROUP")) // deprecated name
         .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
@@ -519,6 +523,7 @@ fn map_to_internal(id: IdTokenClaims, cfg: &OidcConfig, ttl_secs: u64) -> Result
         .to_string();
 
     let is_admin = compute_is_admin(&username, &id.extra);
+    let roots = dutopia::authz::roots_for(&username);
 
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -529,6 +534,7 @@ fn map_to_internal(id: IdTokenClaims, cfg: &OidcConfig, ttl_secs: u64) -> Result
     Ok(Claims {
         sub: username,
         is_admin,
+        roots,
         exp: exp.try_into().unwrap(),
     })
 }
@@ -783,14 +789,61 @@ mod tests {
     }
 
     #[test]
-    fn map_to_internal_uses_username_claim_and_admin_group() {
+    fn map_to_internal_uses_username_claim_and_global_admins() {
         let mut extra = HashMap::new();
         extra.insert(
             "preferred_username".to_string(),
             serde_json::Value::String("alice".into()),
         );
         let id = IdTokenClaims { extra };
-        let cfg = OidcConfig {
+        let cfg = test_cfg();
+        unsafe { std::env::set_var("GLOBAL_ADMINS", "alice,bob") };
+        unsafe { std::env::remove_var("STORAGE_ADMINS") };
+        let c = map_to_internal(id, &cfg, 60).unwrap();
+        assert_eq!(c.sub, "alice");
+        assert!(c.is_admin);
+        assert!(c.roots.is_empty());
+        unsafe { std::env::remove_var("GLOBAL_ADMINS") };
+    }
+
+    #[test]
+    fn map_to_internal_populates_storage_admin_roots() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "preferred_username".to_string(),
+            serde_json::Value::String("carol".into()),
+        );
+        let id = IdTokenClaims { extra };
+        let cfg = test_cfg();
+        unsafe { std::env::remove_var("GLOBAL_ADMINS") };
+        unsafe { std::env::set_var("STORAGE_ADMINS", "carol:/red/peddn7,/red/peddn8") };
+        let c = map_to_internal(id, &cfg, 60).unwrap();
+        assert_eq!(c.sub, "carol");
+        assert!(!c.is_admin);
+        assert_eq!(
+            c.roots,
+            vec!["/red/peddn7".to_string(), "/red/peddn8".to_string()]
+        );
+        unsafe { std::env::remove_var("STORAGE_ADMINS") };
+    }
+
+    #[test]
+    fn legacy_admin_group_still_grants_admin() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "preferred_username".to_string(),
+            serde_json::Value::String("alice".into()),
+        );
+        let id = IdTokenClaims { extra };
+        let cfg = test_cfg();
+        unsafe { std::env::remove_var("GLOBAL_ADMINS") };
+        unsafe { std::env::set_var("ADMIN_GROUP", "alice") };
+        assert!(map_to_internal(id, &cfg, 60).unwrap().is_admin);
+        unsafe { std::env::remove_var("ADMIN_GROUP") };
+    }
+
+    fn test_cfg() -> OidcConfig {
+        OidcConfig {
             issuer: "x".into(),
             client_id: "x".into(),
             client_secret: "x".into(),
@@ -801,11 +854,6 @@ mod tests {
             token_endpoint: "x".into(),
             jwks_uri: "x".into(),
             post_login_redirect: "/".into(),
-        };
-        unsafe { std::env::set_var("ADMIN_GROUP", "alice,bob") };
-        let c = map_to_internal(id, &cfg, 60).unwrap();
-        assert_eq!(c.sub, "alice");
-        assert!(c.is_admin);
-        unsafe { std::env::remove_var("ADMIN_GROUP") };
+        }
     }
 }

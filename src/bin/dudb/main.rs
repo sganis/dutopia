@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use clap::{ColorChoice, Parser};
 use colored::Colorize;
 use dutopia::util::{parse_age_pair, parse_file_hint, print_about, AgeCfg};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -102,8 +102,7 @@ fn main() -> Result<()> {
     println!("done");
     println!("Total lines  : {}", total_lines);
 
-    let mut conn = Connection::open(&building)
-        .with_context(|| format!("opening {}", building.display()))?;
+    let mut conn = open_build_db(&building)?;
     schema::apply_ingest_pragmas(&conn)?;
     schema::create_tables(&conn)?;
 
@@ -205,6 +204,30 @@ fn main() -> Result<()> {
     }
     println!("Elapsed time : {:.2} seconds", started.elapsed().as_secs_f64());
     Ok(())
+}
+
+/// Open the build file for writing. Falls back to the `unix-none` VFS (no
+/// fcntl locking) when the output filesystem can't provide locks at all —
+/// e.g. an NFSv3 mount with `local_lock=none` and no NLM daemon, where every
+/// lock attempt returns ENOLCK and SQLite reports "database is locked". Safe
+/// here because the build is a single connection on a private scratch file
+/// renamed into place only on success; no other process can reach it.
+fn open_build_db(building: &Path) -> Result<Connection> {
+    let err_ctx = || format!("opening {}", building.display());
+    let flags = OpenFlags::default();
+    let conn = match Connection::open_with_flags(building, flags) {
+        Ok(c) => {
+            // Probe: reading sqlite_master takes the first SHARED lock, which
+            // is what fails with ENOLCK on lock-less mounts.
+            match c.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(())) {
+                Ok(()) => c,
+                Err(_) => Connection::open_with_flags_and_vfs(building, flags, "unix-none")
+                    .with_context(err_ctx)?,
+            }
+        }
+        Err(e) => return Err(e).with_context(err_ctx),
+    };
+    Ok(conn)
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {

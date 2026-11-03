@@ -15,17 +15,23 @@ use dutopia::db;
 use dutopia::item::{get_items, FilesOut};
 use crate::email;
 use crate::query::{parse_users_csv, FilesQuery, FolderQuery};
-use crate::{get_db, get_users};
+use crate::get_users;
 
 /// GET /api/health
 ///
 /// `smtp_configured` tells the frontend whether the Notify button in the
 /// cleanup panel should be enabled — without this probe the button would
 /// always render and then fail on click with a 501.
+///
+/// `db_version` is the DB's `built_at` (probed once at startup, so no
+/// per-request query). The frontend uses it to invalidate its browser-side
+/// cache when the DB is rebuilt; null means no usable DB is loaded and
+/// clients fall back to TTL-only expiry.
 pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "smtp_configured": email::is_configured(),
+        "db_version": crate::db_version(),
     }))
 }
 
@@ -50,7 +56,8 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
         + TTL_SECONDS;
     let exp: usize = exp_secs.try_into().map_err(|_| AuthError::TokenCreation)?;
 
-    let admins: HashSet<String> = std::env::var("ADMIN_GROUP")
+    let admins: HashSet<String> = std::env::var("GLOBAL_ADMINS")
+        .or_else(|_| std::env::var("ADMIN_GROUP")) // deprecated name
         .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
@@ -60,9 +67,18 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
     let is_admin =
         verified.admin_override || admins.contains(&payload.username.trim().to_ascii_lowercase());
 
+    // Storage admins keep their roots even when they are also global admins
+    // (roots are ignored while is_admin is set).
+    let roots = if verified.admin_override {
+        Vec::new()
+    } else {
+        dutopia::authz::roots_for(&payload.username)
+    };
+
     let claims = Claims {
         sub: payload.username.to_owned(),
         is_admin,
+        roots,
         exp,
     };
     tracing::info!(user = %claims.sub, is_admin = claims.is_admin, "login success");
@@ -75,7 +91,9 @@ pub async fn login_handler(Json(payload): Json<AuthPayload>) -> Result<Json<Auth
 
 /// GET /api/users
 pub async fn users_handler(claims: Claims) -> Response {
-    if claims.is_admin {
+    // Storage admins get the full list too: the user picker is how they
+    // filter within their assigned storage.
+    if claims.is_admin || !claims.roots.is_empty() {
         let users = get_users();
         tracing::info!(count = users.len(), "200 OK /api/users");
         Json(users).into_response()
@@ -104,18 +122,28 @@ pub async fn get_folders_handler(
         _ => Vec::new(),
     };
 
-    if !claims.is_admin {
-        if requested.is_empty() || requested.len() != 1 || requested[0] != claims.sub {
+    let access = match dutopia::authz::check_access(&claims, &path, &requested) {
+        Ok(a) => a,
+        Err(_) => {
             tracing::warn!(
+                user = %claims.sub,
                 path = %path,
                 requested_users = ?requested,
                 "403 Forbidden /api/folders"
             );
             return AuthError::Forbidden.into_response();
         }
-    }
+    };
+    // Storage admin navigating an ancestor of their roots: drop the
+    // requested users (they'd leak sibling-branch stats) and filter the
+    // children below to the route into their roots.
+    let navigable = access == dutopia::authz::AccessMode::Navigable;
+    let requested = if navigable { Vec::new() } else { requested };
 
-    let pool = get_db().clone();
+    let pool = match crate::get_db() {
+        Some(p) => p.clone(),
+        None => return crate::db_unavailable(),
+    };
     let path_for_task = path.clone();
     let age_filter = q.age;
     let fut = tokio::task::spawn_blocking(move || {
@@ -132,6 +160,9 @@ pub async fn get_folders_handler(
                 .into_response();
         }
         Ok(Ok(mut v)) => {
+            if navigable {
+                dutopia::authz::filter_navigable_children(&claims.roots, &mut v);
+            }
             let cap = crate::query::max_page_size();
             if v.len() > cap {
                 tracing::warn!(path = %path, total = v.len(), cap, "/api/folders truncated");
@@ -182,9 +213,18 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
         _ => Vec::new(),
     };
 
-    if !claims.is_admin {
-        if requested.is_empty() || requested.len() != 1 || requested[0] != claims.sub {
+    match dutopia::authz::check_access(&claims, &folder, &requested) {
+        Ok(dutopia::authz::AccessMode::Navigable) => {
+            // Storage admin walking an ancestor of their roots: there are no
+            // files to manage at this level, return an empty listing rather
+            // than a 403 so the SPA keeps working while navigating.
+            tracing::info!(user = %claims.sub, path = %folder, "200 OK /api/files (navigable)");
+            return Json(FilesOut::default()).into_response();
+        }
+        Ok(dutopia::authz::AccessMode::Full) => {}
+        Err(_) => {
             tracing::warn!(
+                user = %claims.sub,
                 path = %folder,
                 requested_users = ?requested,
                 "403 Forbidden /api/files"
@@ -206,7 +246,10 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
     // read_dir below only serves dev setups / folder-only DBs.
     if crate::files_indexed() {
         let cap = crate::files_limit(cap);
-        let pool = get_db().clone();
+        let pool = match crate::get_db() {
+            Some(p) => p.clone(),
+            None => return crate::db_unavailable(),
+        };
         let folder_for_task = folder.clone();
         let fut = tokio::task::spawn_blocking(move || {
             db::list_files(&pool, &folder_for_task, &requested, age, cap)

@@ -29,12 +29,28 @@ pub struct FolderOut {
 }
 
 /// Open a read-only connection pool against the given DB and validate schema.
+///
+/// On a filesystem that cannot provide POSIX file locks (NFSv3 mounted with
+/// `local_lock=none`: every fcntl lock returns ENOLCK), SQLite reports
+/// "database is locked" on the first read and the r2d2 pool burns its whole
+/// timeout retrying, so duapi dies at boot. When the probe below detects
+/// that, the pool is built on the `unix-none` VFS (no locking) via a
+/// `file:...?vfs=unix-none` URI — the same escape `dudb::open_build_db`
+/// uses when building on such a mount. Safe because every pool connection
+/// is read-only and dudb publishes the finished DB by atomic rename: no
+/// writer ever contends on this file.
 pub fn open_pool(db: &Path) -> Result<DbPool> {
     if !db.exists() {
         return Err(anyhow!("DB file not found: {}", db.display()));
     }
-    let manager = SqliteConnectionManager::file(db)
-        .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut target = db.display().to_string();
+    if !file_locks_work(db) {
+        flags |= OpenFlags::SQLITE_OPEN_URI;
+        target = format!("file:{}?vfs=unix-none", uri_escape(&target));
+    }
+    let manager = SqliteConnectionManager::file(&target)
+        .with_flags(flags)
         .with_init(|c| {
             c.execute_batch(
                 "PRAGMA query_only = ON;
@@ -73,6 +89,44 @@ pub fn open_pool(db: &Path) -> Result<DbPool> {
         }
     }
     Ok(pool)
+}
+
+/// Probe whether the filesystem holding `db` can take POSIX file locks:
+/// open it read-only, take a SHARED fcntl lock (what SQLite does internally
+/// for the very first read) and drop it. On NFSv3 with `local_lock=none`
+/// and no NLM daemon the lock call returns ENOLCK — the condition that
+/// makes every SQLite access fail with "database is locked".
+fn file_locks_work(db: &Path) -> bool {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+
+    let file = match OpenOptions::new().read(true).open(db) {
+        Ok(f) => f,
+        Err(_) => return true, // let SQLite surface the real open error
+    };
+    let flock = libc::flock {
+        l_type: libc::F_RDLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0,
+        l_len: 1, // a single byte; SQLite locks the PENDING byte similarly
+        l_pid: 0,
+    };
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &flock) };
+    rc == 0
+}
+
+/// Percent-encode a path for the query part of a `file:` URI. SQLite only
+/// splits on `?` and `#` there, so encoding `/` or spaces is unnecessary,
+/// but a literal `?` or `#` in a directory name would truncate the URI.
+fn uri_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '?' | '#' => out.push_str(&format!("%{:02X}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Return all usernames sorted ascending.
@@ -195,6 +249,17 @@ pub fn has_files(pool: &DbPool) -> Result<bool> {
         )
         .ok();
     Ok(v.as_deref() == Some("1"))
+}
+
+/// `built_at` from the `metadata` table (unix timestamp, string, written by
+/// dudb at build time). The DB is immutable once built, so this value is a
+/// build version. None when the key is missing (DB from an older dudb).
+pub fn built_at(pool: &DbPool) -> Result<Option<String>> {
+    let conn = pool.get().context("acquiring connection")?;
+    let v: Option<String> = conn
+        .query_row("SELECT value FROM metadata WHERE key = 'built_at'", [], |r| r.get(0))
+        .optional()?;
+    Ok(v.filter(|s| !s.trim().is_empty()))
 }
 
 /// The `dudb --max-files` the file index was built with; 0 = uncapped (also
@@ -360,7 +425,8 @@ pub mod test_support {
              CREATE TABLE folder_files (folder_id INTEGER PRIMARY KEY, data BLOB NOT NULL);
              CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE INDEX idx_paths_parent ON paths(parent_id);
-             INSERT INTO metadata(key,value) VALUES('schema_version','4'),('has_files','1');
+             INSERT INTO metadata(key,value) VALUES
+               ('schema_version','4'),('has_files','1'),('built_at','1600000000');
              INSERT INTO users(name) VALUES('alice'),('bob');
              INSERT INTO paths(full_path, parent_id) VALUES('', NULL);
              INSERT INTO paths(full_path, parent_id) VALUES(

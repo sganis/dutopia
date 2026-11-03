@@ -1,10 +1,20 @@
 // browser/vitest.config.ts
 import { defineConfig } from 'vitest/config';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
   define: {
     __APP_VERSION__: '"test"',
     __DESKTOP__: 'false',
+  },
+  plugins: [svelte()],
+  resolve: {
+    // Load browser builds (svelte client runtime, not server/SSR)
+    conditions: ['browser'],
+    alias: {
+      // match svelte.config.js kit.alias used by $api imports
+      $api: new URL('./src/ts/api.web.svelte.ts', import.meta.url).pathname,
+    },
   },
   test: {
     environment: 'jsdom',

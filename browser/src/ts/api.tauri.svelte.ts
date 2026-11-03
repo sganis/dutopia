@@ -8,10 +8,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
+type ScannedFile = { path: string; size: number; modified: string; owner: string };
 export type RawFolder = { path: string; users: Record<string, Record<"0" | "1" | "2", AgeMini>> };
 
 export type DriveInfo = {
@@ -58,11 +57,10 @@ class Api {
     return result ?? [];
   }
 
-  async getFiles(path: string, users: string[], age?: number): Promise<FilesResult> {
+  async getFiles(path: string, users: string[], age?: number): Promise<ScannedFile[]> {
     const ageKey = age !== undefined && age !== -1 ? age : null;
-    // The desktop lists the live filesystem: the full list, so total it here.
     const result = await this.call<ScannedFile[]>("get_files", { path, users, age: ageKey });
-    return filesResultFrom(result ?? []);
+    return result ?? [];
   }
 
   async listDrives(): Promise<DriveInfo[]> {

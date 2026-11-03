@@ -78,6 +78,7 @@
             // update app state
             State.username  = claims?.sub || username;
             State.isAdmin  = !!claims?.is_admin;
+            State.roots     = claims?.roots ?? [];
             State.token     = token;
             State.expiresAt = expires_at;
 

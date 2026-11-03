@@ -7,6 +7,7 @@ export const initialState = {
   username: "",
   token: "",
   isAdmin: false,
+  roots: [] as string[],
   expiresAt: null
 }
 
@@ -17,6 +18,7 @@ export const State = $state({
   username: appState.username,
   token: appState.token,
   isAdmin: appState.isAdmin,
+  roots: appState.roots ?? [],
   expiresAt: appState.expiresAt,
   logout: () => {
     Object.assign(State, initialState);

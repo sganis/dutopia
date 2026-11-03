@@ -1,10 +1,14 @@
 // rs/src/bin/dusum/aggregate.rs
 use std::collections::HashMap;
 
-/// Pick the native separator byte for a raw path. A backslash anywhere in the
-/// path (or a drive-letter prefix) means Windows-native; otherwise Unix.
+/// Pick the native separator byte for a raw path, decided by the path PREFIX:
+/// `\\srv\share` (UNC) and `C:\…` (drive letter) are Windows-native; anything
+/// else is Unix. A backslash in the middle of a Unix path is just part of a
+/// (weird but legal) directory name — e.g. Linux dirs literally named
+/// `\aramco.com\ecc\…` created by Windows tools — and must NOT flip the path
+/// to Windows-style splitting, which orphans whole subtrees from `/`.
 fn separator(path: &[u8]) -> u8 {
-    if path.iter().any(|&b| b == b'\\') {
+    if path.starts_with(b"\\\\") {
         return b'\\';
     }
     if path.len() >= 2 && path[0].is_ascii_alphabetic() && path[1] == b':' {
@@ -202,6 +206,37 @@ mod tests {
         // No path separator at all: no ancestor folders.
         let res = get_folder_ancestors(b"file.txt");
         assert!(res.is_empty());
+    }
+
+    /// Regression: Linux dirs whose NAME contains backslashes (Windows tools
+    /// writing UNC paths as literal dir names on a Linux FS). The path is
+    /// Unix — ancestors must chain up to `/`, not collapse the whole
+    /// `/red/...` prefix into one top-level segment (the pre-fix bug that
+    /// surfaced these subtrees at the synthetic root).
+    #[test]
+    fn ancestors_unix_with_backslash_names() {
+        let res = get_folder_ancestors(
+            b"/red/peddn7/x/QUICKLOOK_EXPU/\\aramco.com\\ecc\\data\\f.txt",
+        );
+        assert_eq!(res[0], b"/".to_vec());
+        assert!(res.contains(&b"/red".to_vec()));
+        assert!(res.contains(&b"/red/peddn7".to_vec()));
+        // Last ancestor: the deepest '/'-delimited folder. The weird dir
+        // itself becomes a node via the `is_dir` self_path push in main.rs,
+        // parented by dusum_parent at the last '/' — consistent with this.
+        assert_eq!(res.last().unwrap(), &b"/red/peddn7/x/QUICKLOOK_EXPU".to_vec());
+    }
+
+    /// UNC-style `\\`-prefixed dirs nested inside a Unix path must also stay
+    /// Unix: `\\aramco…` is the dir NAME here, not a UNC prefix of the path.
+    #[test]
+    fn ancestors_unix_with_leading_double_backslash_dirname() {
+        let res = get_folder_ancestors(b"/red/a/QUICKLOOK_EXPU/\\\\aramco.com\\ecc\\f.txt");
+        assert_eq!(res[0], b"/".to_vec());
+        assert!(res.contains(&b"/red".to_vec()));
+        // The `\\aramco…` name never becomes the FIRST ancestor (UNC root):
+        // the chain starts at `/`.
+        assert!(res.iter().all(|p| p.starts_with(b"/")));
     }
 
     #[test]

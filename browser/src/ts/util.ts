@@ -32,6 +32,9 @@ export const humanCount = (n, maxFrac = 1, locale = 'en') =>
 // compact(1234) -> "1.2K"
 
 export function escapeHtml(str: string): string {
+  // Guard against non-string input (e.g. undefined from transient
+  // virtual-list rows) — callers render the result into HTML.
+  if (!str) return "";
   return str
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -89,6 +92,28 @@ export function getParent(inputPath: string): string {
 export function capitalize(str) {
   if (!str) return "";
   return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+/** Resolve typed text to a concrete option for Svelecte's Enter behavior.
+ *  Svelecte picks the item at its internal highlight index, which can be
+ *  stale after filtering — so we resolve Enter ourselves:
+ *    1. case-insensitive exact match, or
+ *    2. unique case-insensitive prefix match
+ *  Returns null when the text is ambiguous or matches nothing, leaving the
+ *  caller free to fall back to Svelecte's default Enter handling. */
+export function matchOption<T>(
+  text: string,
+  options: T[],
+  label: (opt: T) => string
+): T | null {
+  const typed = (text ?? '').trim().toLowerCase();
+  if (!typed || !options?.length) return null;
+
+  const exact = options.find(o => label(o)?.toLowerCase() === typed);
+  if (exact) return exact;
+
+  const prefixes = options.filter(o => label(o)?.toLowerCase().startsWith(typed));
+  return prefixes.length === 1 ? prefixes[0] : null;
 }
 
 // export const COLORS = [

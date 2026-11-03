@@ -2,9 +2,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
-  import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS, escapeHtml } from "../ts/util";
-  import { aggregatePathTotals } from "../ts/transform";
-  import type { FileTotals } from "../ts/models";
+  import { getParent, humanTime, humanCount, humanBytes, getOptimalColors, COLORS, escapeHtml, matchOption } from "../ts/util";
   import { api } from "$api";
   import { API_URL, State } from "../ts/store.svelte";
   import Svelecte, { addRenderer } from "svelecte";
@@ -83,10 +81,7 @@
   let fullPath = $state("");
   let folders = $state<FolderItem[]>([]);
   let files = $state<ScannedFile[]>([]);
-  // All of the folder's own files per owner; `files` lists only the largest.
-  let fileTotals = $state<Record<string, FileTotals>>({});
   let loading = $state(false);
-  let filesLoading = $state(false);
   let initializing = $state(false);
   let progress_current = $state(0);
   let progress_total = $state(0);
@@ -116,18 +111,22 @@
     const c = COLORS[2] ?? b;
     const d = COLORS[3] ?? c;
 
+    // Svelecte's virtualList renders stale rows as `{}` for one pass while
+    // start/end catch up with a shrunk or refiltered list, so item.user can
+    // be undefined here. Render those transient rows empty instead of crashing.
+    const user = item.user ?? "";
     const icon_bg =
-      item.user === "All Users"
+      user === "All Users"
         ? `linear-gradient(90deg, ${a} 0%, ${b} 33%, ${c} 66%, ${d} 100%)`
         : _isSelection
           ? selectedUserColor
-          : item.color;
-    const user_css = (!__DESKTOP__ && !State.isAdmin) ? "text-gray-400" : "";
+          : item.color ?? "";
+    const user_css = (!__DESKTOP__ && !State.isAdmin && !State.roots.length) ? "text-gray-400" : "";
     return `<div class="flex gap-2 items-center">
                 <div class="border border-gray-500 rounded"
                     style="${icon_base} background: ${icon_bg};">
                 </div>
-                <div class="${user_css}">${escapeHtml(item.user)}</div>
+                <div class="${user_css}">${escapeHtml(user)}</div>
             </div>`;
   }
   addRenderer("color", colorRenderer);
@@ -298,6 +297,79 @@
     }
   }
 
+  function aggregatePathTotals(foldersArr: FolderItem[], filesArr: ScannedFile[], p: string): FolderItem {
+    let total_count = 0;
+    let total_disk = 0;
+    let total_size = 0;
+    let total_linked = 0;
+    let accessed = 0;
+    let modified = 0;
+    const aggUsers: Record<string, UserStatsJson> = {};
+
+    for (const f of foldersArr ?? []) {
+      total_count += toNum(f?.total_count);
+      total_disk += toNum(f?.total_disk);
+      total_size += toNum(f?.total_size);
+      total_linked += toNum(f?.total_linked);
+      if (f.accessed > accessed) accessed = f.accessed;
+      if (f.modified > modified) modified = f.modified;
+
+      const u = f?.users ?? {};
+      for (const [uname, data] of Object.entries(u)) {
+        const d = data as UserStatsJson;
+        const prev = aggUsers[uname] ?? {
+          username: uname,
+          count: 0,
+          disk: 0,
+          size: 0,
+          linked: 0,
+          atime: 0,
+          mtime: 0,
+        };
+        aggUsers[uname] = {
+          username: uname,
+          count: prev.count + toNum(d.count),
+          disk: prev.disk + toNum(d.disk),
+          size: prev.size + toNum(d.size),
+          linked: prev.linked + toNum(d.linked),
+          atime: Math.max(prev.atime, toNum(d.atime)),
+          mtime: Math.max(prev.mtime, toNum(d.mtime)),
+        };
+      }
+    }
+
+    for (const file of filesArr ?? []) {
+      total_count += 1;
+      total_disk += toNum(file?.size);
+      total_size += toNum(file?.size);
+      if (file.accessed > accessed) accessed = file.accessed;
+      if (file.modified > modified) modified = file.modified;
+
+      const owner = file.owner;
+      if (owner) {
+        const prev = aggUsers[owner] ?? {
+          username: owner,
+          count: 0,
+          disk: 0,
+          size: 0,
+          linked: 0,
+          atime: 0,
+          mtime: 0,
+        };
+        aggUsers[owner] = {
+          username: owner,
+          count: prev.count + 1,
+          disk: prev.disk + toNum(file.size),
+          size: prev.size + toNum(file.size),
+          linked: prev.linked,
+          atime: Math.max(prev.atime, toNum(file.accessed)),
+          mtime: Math.max(prev.mtime, toNum(file.modified)),
+        };
+      }
+    }
+
+    return { path: p, total_count, total_disk, total_size, total_linked, accessed, modified, users: aggUsers };
+  }
   //#endregion
 
   //#region derived state
@@ -324,19 +396,7 @@
     return Math.round(Math.max(0, Math.min(100, p)) * 10) / 10;
   };
 
-  const pathTotals = $derived.by(() => aggregatePathTotals(folders, fileTotals, path));
-
-  // The folder's files the list leaves out (only the largest are listed).
-  const unlistedFiles = $derived.by(() => {
-    let count = 0;
-    let size = 0;
-    for (const t of Object.values(fileTotals)) {
-      count += toNum(t.count);
-      size += toNum(t.size);
-    }
-    for (const f of files) size -= toNum(f.size);
-    return { count: Math.max(0, count - files.length), size: Math.max(0, size) };
-  });
+  const pathTotals = $derived.by(() => aggregatePathTotals(folders, files, path));
 
   const sortedfiles = $derived.by(() => {
     const arr = files ? [...files] : [];
@@ -379,43 +439,17 @@
     };
   }
 
-  // Files load in the background so folders render as soon as they arrive.
-  // Each fetch bumps the token; a reply for a folder already left is dropped.
-  let filesToken = 0;
-
-  async function fetchFiles(_p: string, userFilter: string[], age: number) {
-    const token = ++filesToken;
-    // /api/files rejects the roots ("", "/").
-    if (_p === "" || _p === "/") {
-      filesLoading = false;
-      return;
-    }
-    filesLoading = true;
-    try {
-      const result = await api.getFiles(_p, userFilter, age);
-      if (token === filesToken) {
-        files = result.files;
-        fileTotals = result.totals;
-      }
-    } finally {
-      if (token === filesToken) filesLoading = false;
-    }
-  }
-
   const fetchFolders = createDoItAgain(async (_p: string) => {
     loading = true;
-    files = [];
-    fileTotals = {};
-    filesToken++;
-    const userFilter: string[] = selectedUser === "All Users" ? [] : [selectedUser];
-    const age = ageFilter;
     try {
-      const raw: RawFolder[] = await api.getFolders(_p, userFilter, age);
-      folders = transformFolders(raw, age);
+      const userFilter: string[] = selectedUser === "All Users" ? [] : [selectedUser];
+      const raw: RawFolder[] = await api.getFolders(_p, userFilter, ageFilter);
+      folders = transformFolders(raw, ageFilter);
+      // /api/files is a live directory walk and rejects the roots ("", "/").
+      files = _p === "" || _p === "/" ? [] : await api.getFiles(_p, userFilter, ageFilter);
     } finally {
       loading = false;
     }
-    void fetchFiles(_p, userFilter, age);
   });
   //#endregion
 
@@ -470,6 +504,32 @@
     selectedUserColor = userColors.get(selectedUser) || "#353599";
     refresh();
   }
+
+  /** Enter on typed text selects the user directly. Svelecte's Enter picks
+   *  the item at its internal highlight index, which can be stale after
+   *  filtering — resolve the typed text ourselves instead. */
+  function onUserEnterKey(e: KeyboardEvent) {
+    const input = e.target as HTMLInputElement;
+    const match = matchOption(input.value, userDropdown, o => o.user);
+    if (match && match.user !== selectedUser) {
+      e.preventDefault();
+      selectedUser = match.user;
+      onUserChanged();
+    }
+    // No match: let Svelecte run its own Enter handling (highlighted item).
+  }
+
+  /** Firefox (and sometimes Chrome) ignores autocomplete="off" on text inputs
+   *  and pops up its own history dropdown while typing in the user select.
+   *  When that native popup is open, Enter confirms the browser's suggestion
+   *  instead of reaching Svelecte — typed users then never get selected.
+   *  Svelecte hardcodes autocomplete="off" with no prop to change it, so
+   *  rewrite the attribute to a random unrecognized token, which browsers
+   *  treat as "no suggestions, ever". */
+  function disableNativeAutocomplete() {
+    const input = document.querySelector<HTMLInputElement>("input.sv-input--text");
+    if (input) input.setAttribute("autocomplete", `svelecte-user-${Math.random().toString(36).slice(2, 8)}`);
+  }
   //#endregion
 
   //#region path
@@ -523,7 +583,10 @@
   }
 
   function onPathKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") navigateTo(fullPath || path);
+    // Navigate from what's IN the input, not from the possibly-stale `fullPath`
+    // of the previous navigation — otherwise Enter sends you to the path you
+    // were at before typing, not the one you just typed.
+    if (e.key === "Enter") navigateTo(displayPath(path));
   }
 
   async function copyText(e) {
@@ -608,20 +671,31 @@
   //#endregion
 
   onMount(async () => {
+    disableNativeAutocomplete();
+
     users = await api.getUsers();
     allColors = getOptimalColors(users.length);
     createUserDropdown(users);
 
-    if (__DESKTOP__ || State.isAdmin) {
+    if (__DESKTOP__ || State.isAdmin || State.roots.length) {
       selectedUser = "All Users";
     } else {
       selectedUser = State.username;
     }
 
+    // Storage admins land directly inside their first assigned root — the
+    // synthetic root would only show the (filtered) route towards it.
+    if (!__DESKTOP__ && !State.isAdmin && State.roots.length) {
+      path = State.roots[0];
+    }
+
     // Web build: probe /api/health once so the cleanup panel can disable
-    // the Notify button when SMTP isn't configured on the server.
+    // the Notify button when SMTP isn't configured on the server. Awaited:
+    // it also seeds the cache's DB version (and wipes stale entries when
+    // the DB was rebuilt), which must be settled before refresh() starts
+    // reading the cache.
     if (!__DESKTOP__) {
-      api.probeHealth();
+      await api.probeHealth();
     }
 
     fullPath = path;
@@ -668,14 +742,15 @@
     {/if}
 
     <Svelecte
-      disabled={!__DESKTOP__ && !State.isAdmin}
+      disabled={!__DESKTOP__ && !State.isAdmin && !State.roots.length}
       bind:value={selectedUser}
       options={userDropdown}
       name="user-select"
       valueField="user"
       renderer="color"
-      highlightFirstItem={false}
+      highlightFirstItem={true}
       onChange={onUserChanged}
+      onEnterKey={onUserEnterKey}
       closeAfterSelect={true}
       deselectMode="native"
       virtualList={true}
@@ -825,10 +900,6 @@
         />
       {/each}
 
-      {#if filesLoading}
-        <div class="p-3 text-sm text-gray-400 animate-pulse">Loading files...</div>
-      {/if}
-
       {#each sortedfiles as file}
         <FileBar
           {file}
@@ -839,16 +910,6 @@
           onDelete={targetForDeletion}
         />
       {/each}
-
-      {#if unlistedFiles.count > 0}
-        <div class="flex" title="Only the largest files are listed">
-          <span class="material-symbols-outlined text-4xl">more_horiz</span>
-          <div class="flex grow items-center justify-between px-2 py-1 border border-dashed border-gray-500 rounded text-xs text-gray-300">
-            <span>{humanCount(unlistedFiles.count)} more {unlistedFiles.count === 1 ? "file" : "files"}</span>
-            <span class="text-sm font-semibold">{humanBytes(unlistedFiles.size)}</span>
-          </div>
-        </div>
-      {/if}
     </div>
   {/if}
   <div class="grow"></div>

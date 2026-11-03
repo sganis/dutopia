@@ -38,12 +38,25 @@ pub fn dusum_parent(p: &str) -> Option<String> {
         return None;
     }
 
-    // Find the rightmost separator (either kind, whichever appears last).
-    let last = match (p.rfind('\\'), p.rfind('/')) {
-        (Some(a), Some(b)) => a.max(b),
-        (Some(a), None) => a,
-        (None, Some(b)) => b,
-        (None, None) => return None,
+    // Decide the separator by the path PREFIX, matching
+    // `dusum::aggregate::separator`: UNC `\\…` and drive-letter `C:\…` are
+    // Windows-native, everything else is Unix. A backslash inside a Unix
+    // path is part of a (legal) directory name — e.g. Linux dirs literally
+    // named `\aramco.com\ecc\…` — and must not be treated as a separator,
+    // or dudb would parent those subtrees differently than dusum grouped
+    // them and they'd surface at the synthetic root.
+    let sep: char = if p.starts_with(r"\\")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
+        '\\'
+    } else {
+        '/'
+    };
+
+    // Find the rightmost separator of the native kind.
+    let last = match p.rfind(sep) {
+        Some(i) => i,
+        None => return None,
     };
 
     // Subdir of Unix root: "/var" → "/"
@@ -264,6 +277,23 @@ mod tests {
     #[test]
     fn dusum_parent_synthetic_root() {
         assert_eq!(dusum_parent(""), None);
+    }
+
+    /// Regression: Linux directories whose NAME contains backslashes (Windows
+    /// tools writing UNC paths as literal dir names, e.g. peddn7's
+    /// `\aramco.com\ecc\…`). These are Unix paths — the backslash is part of
+    /// the leaf name, not a separator — so their parents must chain up to `/`
+    /// like any other Unix path.
+    #[test]
+    fn dusum_parent_unix_with_backslash_names() {
+        assert_eq!(
+            dusum_parent("/red/peddn7/x/QUICKLOOK_EXPU/\\aramco.com\\ecc"),
+            Some("/red/peddn7/x/QUICKLOOK_EXPU".to_string())
+        );
+        assert_eq!(
+            dusum_parent("/red/peddn7/x/QUICKLOOK_EXPU"),
+            Some("/red/peddn7/x".to_string())
+        );
     }
 
     /// Cross-check: for every path `dusum::get_folder_ancestors` would emit,
