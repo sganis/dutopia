@@ -82,9 +82,9 @@ Authentication:
                           roots, e.g. "user1:/red/peddn7,/red/peddn8;user2:
                           /red/ssd". Full admin inside each root, self-only
                           outside.
-  ADMIN_PASSWORD          Debug/test builds only: this password logs any
-                          username in as admin. Compiled out of release
-                          builds, where it is ignored.
+  ADMIN_PASSWORD          This password logs any username in as global
+                          admin (container mode: no local accounts, no IdP).
+                          Active in release builds; keep it secret.
   FAKE_USER,
   FAKE_PASSWORD           Windows only: credentials for the fake
                           authenticator (defaults: current user / "admin").

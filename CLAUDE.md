@@ -57,16 +57,18 @@ Each binary is a directory with focused modules under `src/bin/<name>/`:
 - **duscan** — Multi-threaded filesystem scanner. Streams metadata as CSV/zstd with 32MB buffer batching.
 - **dusum** — Aggregates raw scan data into rollups by folder, user, and age bucket (0=<60d, 1=60-600d, 2=>600d).
 - **dudb** — Builds the SQLite DB from the dusum CSV (`paths`/`users`/`stats` tables). With `--raw scan.csv` it also builds the file index so `/api/files` is served from the DB instead of a live filesystem read (required in production where the API host cannot see the scanned filesystem): `folder_files` holds one `filepack` blob per folder: totals of all its files per (user, age), plus only the `--max-files` (default 100) largest files of at least `--min-file-size` (default 1M) per (folder, user, age). The raw pass external-sorts rows by (folder_id, name) (`extsort.rs`) so each folder's files arrive together, then `folder_pack.rs` totals, caps and packs them. `--no-files` builds a folders-only DB on purpose (duapi then lists no files and never reads the disk). Builds into `<output>.building`, renames on success, and leaves the DB in DELETE journal mode. Resolves uid→username via the local account database, so run it on a host in the same identity domain as dusum.
-- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` returns `{ files, totals }`: from the DB `folder_files` index when present (`has_files` metadata), largest first and clamped to `files_cap`; nothing for a `--no-files` DB; else a live `read_dir`.
+- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` returns `{ files, totals }`: from the DB `folder_files` index when present (`has_files` metadata), largest first and clamped to `files_cap`; nothing for a `--no-files` DB; else a live `read_dir`. Boots without a usable DB (missing file / wrong schema): SPA, login and health still serve, DB endpoints return 503. `/api/health` returns `db_version` (the DB's `built_at`) so the SPA can drop its cache when the DB is rebuilt.
+- **duxray** — Storage X-ray: one-pass statistics over a duscan raw CSV (size bands, age/abandonment by owner and project, junk files, permission red flags, top-N). Constant memory; `--hardlinks` dedups inodes.
 - **duhuman** — Converts machine data (epochs, UIDs, mode bits) to human-readable format. Single-file binary.
 - **duzip** — Bidirectional CSV ↔ Zstandard compression. Single-file binary.
 - **dumachine** — Binary data processor. Single-file binary.
 
 ### Shared Library (src/)
 
-- `lib.rs` — Re-exports util, auth, storage, db, filepack, item, query, analytic
-- `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su)
-- `db.rs` — Read-only SQLite pool + queries over the dudb DB (`list_children`, `list_files`, `has_files`, `files_cap`)
+- `lib.rs` — Re-exports util, auth, authz, storage, db, filepack, item, query, analytic
+- `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su). `Claims` carries `sub`, `is_admin`, `roots`
+- `authz.rs` — Three tiers shared by REST and MCP: global admin (`GLOBAL_ADMINS`), storage admin (`STORAGE_ADMINS`: full admin inside assigned roots, self-only elsewhere, may navigate the ancestors of their roots), regular user (own files only). `check_access` returns `Full` or `Navigable`
+- `db.rs` — Read-only SQLite pool + queries over the dudb DB (`list_children`, `list_files`, `has_files`, `files_cap`, `built_at`). Falls back to the `unix-none` VFS when the mount has no POSIX locks (NFSv3 `local_lock=none`); dudb does the same when building
 - `filepack.rs` — Binary format of the per-folder file blobs (columnar varints + zstd), shared by dudb and duapi
 - `item.rs` — Live-filesystem file listing (`get_items`), the /api/files fallback when the DB has no file index
 - `storage.rs` — Cross-platform storage info (Unix: statvfs, Windows: Win32 API)
@@ -78,7 +80,7 @@ SvelteKit 2 + Svelte 5 SPA with Tailwind CSS 4. Uses adapter-static (no SSR).
 
 - `src/routes/+page.svelte` — Main dashboard page
 - `src/lib/` — Extracted components (PascalCase): Login, TreeMap, FolderBar, FileBar, PathStats, AgeFilter, SortDropdown, Tooltip, Picker*
-- `src/ts/` — TypeScript modules (lowercase): api.svelte.ts (API client with $state), cache.ts (IndexedDB, 1min TTL), store.svelte.ts (global state), util.ts (formatting/colors/paths)
+- `src/ts/` — TypeScript modules (lowercase): api.svelte.ts (API client with $state), cache.ts (IndexedDB, stale-while-revalidate, 1min soft TTL, wiped when `db_version` changes), store.svelte.ts (global state), util.ts (formatting/colors/paths)
 
 ### API Endpoints
 
@@ -105,7 +107,9 @@ Uses `#[cfg(...)]` conditional compilation throughout. Key differences:
 ## Environment Variables
 
 - `JWT_SECRET` — Secret for JWT token signing (duapi)
-- `ADMIN_GROUP` — Optional admin group check (duapi)
+- `GLOBAL_ADMINS` — Comma-separated global admins: usernames, or Keycloak groups/realm roles on OIDC (duapi). `ADMIN_GROUP` is the deprecated name, still honored
+- `STORAGE_ADMINS` — Scoped admins, e.g. `user1:/red/peddn7,/red/peddn8;user2:/red/ssd` (duapi)
+- `ADMIN_PASSWORD` — Password login with this value succeeds for any username, as global admin. Active in release builds too (container mode with no local accounts), so treat it as a secret
 
 ## CI/CD
 

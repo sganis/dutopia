@@ -296,9 +296,20 @@ Platform auth:
 | Linux   | `su <user> -c true` with password on stdin |
 | Windows | Fake auth against `%USERNAME%` / `FAKE_USER` for development |
 
-Admin: set in the JWT if the username is in `ADMIN_GROUP` (comma-separated,
-case-insensitive) *or* if an `ADMIN_PASSWORD` override matched. The admin
-override is development/CI only — never set `ADMIN_PASSWORD` in production.
+Admin tiers (`src/authz.rs`, same rules for REST and MCP):
+
+- **Global admin** — `is_admin` in the JWT when the username is in
+  `GLOBAL_ADMINS` (comma-separated, case-insensitive; `ADMIN_GROUP` is the
+  deprecated name, still honored) *or* an `ADMIN_PASSWORD` override matched.
+- **Storage admin** — `STORAGE_ADMINS="user1:/red/peddn7,/red/peddn8;user2:/red/ssd"`
+  puts those roots in the JWT (`roots`). Full admin inside each root, self-only
+  elsewhere; may browse the ancestors of a root (children filtered to the route
+  into it, no files). The SPA opens on the first root.
+- **Regular user** — own files only.
+
+`ADMIN_PASSWORD` works in release builds too: it is the container login mode
+(no local accounts, no IdP needed). Any username with that password logs in as
+global admin, so keep it in a Secret and rotate it like `JWT_SECRET`.
 
 ### 3.1 Keycloak / OIDC SSO (optional)
 
@@ -353,7 +364,7 @@ The IdP redirects the browser here with `?code=…&state=…`:
 4. Extracts `username` from the claim named by `OIDC_USERNAME_CLAIM`
    (default `preferred_username`, falling back to `sub`).
 5. Mints the **same internal 24 h JWT** used by password login — including
-   the `is_admin` flag derived from `ADMIN_GROUP` — then clears the state
+   the `is_admin` flag derived from `GLOBAL_ADMINS` — then clears the state
    cookie and 302-redirects to `<OIDC_POST_LOGIN_REDIRECT>#token=<jwt>`.
 
 The SPA reads the token from the URL fragment, stores it in
@@ -364,7 +375,8 @@ tokens.
 Notes and constraints:
 
 - `ADMIN_PASSWORD` only affects the password endpoint — it never applies to
-  OIDC. Admin rights for OIDC users come from `ADMIN_GROUP` only.
+  OIDC. Admin rights for OIDC users come from `GLOBAL_ADMINS` (and roots from
+  `STORAGE_ADMINS`) only.
 - `OIDC_REDIRECT_URI` must match the Keycloak client's registered redirect
   URI exactly (scheme, host, port, path), e.g.
   `https://dutopia.example.com/api/auth/callback`.
@@ -591,8 +603,9 @@ All `duapi` config is flag-or-env; CLI flags win.
 | Env var              | Default         | Purpose |
 |----------------------|-----------------|---------|
 | `JWT_SECRET`         | (required)      | HMAC secret for JWT signing |
-| `ADMIN_GROUP`        | (empty)         | Comma-separated usernames with admin rights |
-| `ADMIN_PASSWORD`     | (unset)         | Dev/CI admin override — do not set in prod |
+| `GLOBAL_ADMINS`      | (empty)         | Comma-separated global admins (`ADMIN_GROUP` deprecated alias) |
+| `STORAGE_ADMINS`     | (empty)         | Scoped admins: `user:/root1,/root2;user2:/root3` |
+| `ADMIN_PASSWORD`     | (unset)         | Container login: any username, as global admin — keep secret |
 | `PORT`               | 8080            | Listen port |
 | `STATIC_DIR`         | `./public`      | SPA directory |
 | `CORS_ORIGIN`        | (none)          | Explicit CORS origin |
@@ -631,7 +644,7 @@ cd browser && npm install && npm run build
 ./target/release/dudb /tmp/data.sum.csv --raw /tmp/data.csv -o /tmp/data.db
 
 # 5) Serve API + UI
-JWT_SECRET=<secret> ADMIN_GROUP=root,alice \
+JWT_SECRET=<secret> GLOBAL_ADMINS=root,alice \
   ./target/release/duapi /tmp/data.db \
   --static-dir ./browser/build --port 8000
 ```
@@ -684,7 +697,7 @@ step-by-step runbook. Three things differ from a plain Docker deployment:
 [Service]
 ExecStart=/opt/dutopia/duapi /opt/dutopia/data.db --port 8000
 Environment=JWT_SECRET=...
-Environment=ADMIN_GROUP=root,alice
+Environment=GLOBAL_ADMINS=root,alice
 Environment=STATIC_DIR=/opt/dutopia/public
 User=dutopia
 ```
@@ -698,7 +711,7 @@ UI is hosted on a separate origin, set `CORS_ORIGIN` explicitly.
 
 - Run as a non-root service account.
 - Strong `JWT_SECRET`; rotate periodically (invalidates all tokens).
-- Never set `ADMIN_PASSWORD` in production.
+- Set `ADMIN_PASSWORD` only when there is no other login path, from a Secret.
 - Enable TLS or terminate at a trusted proxy.
 - Keep the input DB on a mount the service can only read.
 

@@ -8,7 +8,9 @@ data:
   PORT: "8080"
   STATIC_DIR: "/app/public"
   DB_PATH: "/data/data.db"
-  ADMIN_GROUP: "dutopia-admins"
+  GLOBAL_ADMINS: "dutopia-admins"
+  # Scoped admins: full admin inside their roots, self-only elsewhere.
+  # STORAGE_ADMINS: "user1:/red/nas1,/red/nas2;user2:/red/ssd"
   REQUEST_TIMEOUT_SECS: "30"
   MAX_BODY_BYTES: "65536"
   MAX_PAGE_SIZE: "2000"

@@ -22,8 +22,14 @@ cron 02:00    ─► POST /api/trash/claim (token) ─► items older than 24h, 
 
 - `queue.json` in `/data/trash/` (`TRASH_DIR` env). Entry: `{path, size, owner, actor, queued_at}`.
   One mutex; write tmp + rename.
-- `GET /api/trash` → my items (admin: all). `POST /api/trash` → add. `DELETE /api/trash?path=` → Keep.
-  Only the owner or an admin. Reuse `validate()` from `cleanup.rs`.
+- `GET /api/trash` → visible items. `POST /api/trash` → add. `DELETE /api/trash?path=` → Keep.
+  Reuse `validate()` from `cleanup.rs`.
+- Who, using the tiers in `src/authz.rs` (`Claims.roots`):
+  - global admin (`claims.is_admin`): any item;
+  - storage admin: items with `authz::path_in_roots(&claims.roots, path)`, plus their own;
+  - regular user: only items whose `owner == claims.sub`.
+  Same rule for add, Keep and what `GET` lists. `actor` = `claims.sub` (with `ADMIN_PASSWORD`
+  logins that is just the typed username).
 - `POST /api/trash/claim` → needs `Authorization: Bearer $TRASH_TOKEN`; returns items with
   `queued_at` older than 24h and removes them from the queue.
 - Register the routes in `main.rs` next to `/cleanup/*`.
@@ -31,7 +37,10 @@ cron 02:00    ─► POST /api/trash/claim (token) ─► items older than 24h, 
 ## 2. Browser
 
 - `cleanupQueue.svelte.ts`: drop localStorage; load/add/keep through the 3 endpoints
-  (`api.web.svelte.ts`). The rest of the store API stays the same.
+  (`api.web.svelte.ts`). The rest of the store API stays the same. Call them with
+  `use_cache = false`: `fetchCached` (cache.ts) would serve a stale cart.
+- The trash icon follows the same tiers: shown for own single-owner folders, and for any
+  single-owner folder when `State.isAdmin` or the path is inside `State.roots`.
 - `CleanupPanel.svelte`: each row shows "trash after <date>"; Keep calls the server. The Script and
   Notify buttons stay but no longer empty the cart.
 
@@ -52,6 +61,7 @@ Crontab: `0 2 * * * python3 /opt/dutopia/trash_mover.py --fs /red/nas1 --fs /red
 
 - `deploy/openshift/secret.example.sh`: add `TRASH_TOKEN`.
 - `/data` is already a writable PVC; nothing else changes. Short cron section in `deploy/README.md`.
+- `STORAGE_ADMINS` roots and the cron's `--fs` list name the same filesystems (`/red/nas1`, …).
 
 ## Verification
 

@@ -38,7 +38,7 @@ src/
 │   └── +page.svelte  # Main dashboard (726 lines)
 └── ts/               # TypeScript modules (lowercase)
     ├── api.svelte.ts # API client with $state
-    ├── cache.ts      # IndexedDB cache (1min TTL)
+    ├── cache.ts      # IndexedDB cache (stale-while-revalidate, wiped on db_version change)
     ├── store.svelte.ts # Global state
     └── util.ts       # Formatting, colors, paths
 ```

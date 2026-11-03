@@ -17,6 +17,7 @@ It is modular — use only the components you need.
 - **dudb** — builds the SQLite database from `dusum` output; with `--raw` it also indexes each folder's files (totals of all of them, listing the 100 largest of at least 1 MB per folder, owner and age by default) so listings need no filesystem access.  
 - **duzip** — compresses/expands CSV ↔ Zstandard (`.zst`) binary streams.  
 - **duapi** — lightweight REST API server exposing aggregated data.  
+- **duxray** — one-pass statistics over a `duscan` CSV: size distribution, age and abandonment by owner and project, junk files, permission red flags.  
 
 Frontend: **Svelte SPA** (for dashboards and visualization).
 
@@ -73,6 +74,7 @@ Binaries are under `target/release/`:
 * `dudb`
 * `duzip`
 * `duapi`
+* `duxray`
 
 ---
 
