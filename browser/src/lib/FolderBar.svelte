@@ -38,6 +38,7 @@
     onTerminal,
     onDelete,
     canDelete,
+    queued = false,
     onUserHover,
     onUserMove,
     onUserLeave,
@@ -57,6 +58,8 @@
     /** Extra gate on the trash icon (web: the trash tiers + FILESYSTEMS).
      *  Unset = shown for every single-owner folder. */
     canDelete?: (path: string, owner: string) => boolean;
+    /** Already in the trash cart: the trash icon shows it and toggles Keep. */
+    queued?: boolean;
     onUserHover?: (e: MouseEvent, userData: UserStatsJson, percent: number) => void;
     onUserMove?: (e: MouseEvent) => void;
     onUserLeave?: () => void;
@@ -164,6 +167,7 @@
         onDelete={onDelete && singleOwner && (canDelete?.(folder.path, singleOwner) ?? true)
           ? () => onDelete(folder.path, toNum(folder.total_disk), singleOwner!)
           : undefined}
+        deleteActive={queued}
       />
       <p class="text-sm text-right">
         {bottomValueFolder(folder)}

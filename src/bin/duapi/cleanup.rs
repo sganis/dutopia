@@ -15,7 +15,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use dutopia::auth::{AuthError, Claims};
@@ -135,7 +136,14 @@ pub async fn notify_handler(
     };
 
     let subject = format!("Dutopia: cleanup requested for {} paths", req.paths.len());
-    let body = render_email_body(&claims.sub, &req.username, &req.paths, req.message.as_deref());
+    let trash_after = trash_deadlines(&req.username).await;
+    let body = render_email_body(
+        &claims.sub,
+        &req.username,
+        &req.paths,
+        req.message.as_deref(),
+        &trash_after,
+    );
 
     let send_fut = tokio::task::spawn_blocking({
         let to = to.clone();
@@ -159,6 +167,29 @@ pub async fn notify_handler(
             );
             Json(NotifyResp { sent: true, to }).into_response()
         }
+    }
+}
+
+/// When each of `owner`'s queued trash items may be moved (path → unix
+/// seconds). Empty when the queue cannot be read: the email still goes out.
+async fn trash_deadlines(owner: &str) -> HashMap<String, i64> {
+    let owner = owner.to_string();
+    let dir = crate::trash::trash_dir();
+    let after = crate::trash::undo_hours() * 3600;
+    // Only filesystems still listed: no cron node takes the others.
+    let listed = crate::filesystems();
+    let res = tokio::task::spawn_blocking(move || crate::trash::load(&dir)).await;
+    match res {
+        Ok(Ok(queue)) => queue
+            .into_iter()
+            .filter(|e| e.owner == owner && listed.contains(&e.fs))
+            .map(|e| (e.path, e.queued_at + after))
+            .collect(),
+        Ok(Err(e)) => {
+            tracing::warn!(err = %format!("{e:#}"), "notify: cannot read the trash queue");
+            HashMap::new()
+        }
+        Err(_) => HashMap::new(),
     }
 }
 
@@ -310,11 +341,14 @@ if __name__ == "__main__":
     )
 }
 
+/// `trash_after` maps a path queued in the trash to when the nightly cron
+/// may move it (unix seconds): those lines say so, and a note explains Keep.
 fn render_email_body(
     actor: &str,
     target: &str,
     items: &[PathItem],
     message: Option<&str>,
+    trash_after: &HashMap<String, i64>,
 ) -> String {
     let mut body = String::with_capacity(256 + items.len() * 80);
     body.push_str("Hello ");
@@ -338,11 +372,23 @@ fn render_email_body(
         body.push_str(&it.path);
         body.push_str("  (");
         body.push_str(&human_bytes(it.size));
-        body.push_str(")\n");
+        body.push(')');
+        if let Some(when) = trash_after.get(&it.path).and_then(|t| DateTime::from_timestamp(*t, 0)) {
+            body.push_str(&format!("  — trash after {}", when.format("%Y-%m-%d %H:%M UTC")));
+        }
+        body.push('\n');
         total += it.size;
     }
     body.push_str("\nTotal: ");
     body.push_str(&human_bytes(total));
+    if items.iter().any(|it| trash_after.contains_key(&it.path)) {
+        body.push_str(
+            "\n\nPaths marked \"trash after\" are queued for the Dutopia trash: after that \
+             time they are moved to the filesystem's .trash folder and deleted 30 days \
+             later. To keep one, open Dutopia, click the trash button at the top right and \
+             press Keep on it before then.",
+        );
+    }
     body.push_str("\n\n");
     body.push_str("You can ask your admin for a cleanup script that does this automatically.\n");
     body.push_str("— Dutopia\n");
@@ -450,11 +496,46 @@ mod tests {
             "alice",
             &[p("/tmp/a", 1000), p("/tmp/b", 2000)],
             Some("please"),
+            &std::collections::HashMap::new(),
         );
         assert!(body.contains("/tmp/a"));
         assert!(body.contains("/tmp/b"));
         assert!(body.contains("please"));
         assert!(body.contains("alice"));
         assert!(body.contains("admin"));
+        assert!(!body.contains("trash after"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn trash_deadlines_only_for_listed_filesystems() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = |path: &str, fs: &str| crate::trash::Entry {
+            path: path.into(), size: 1, owner: "alice".into(), actor: "alice".into(),
+            fs: fs.into(), queued_at: 100,
+        };
+        crate::trash::save(dir.path(), &[e("/red/nas1/a", "/red/nas1"), e("/red/old/b", "/red/old")]).unwrap();
+        unsafe {
+            std::env::set_var("TRASH_DIR", dir.path());
+            std::env::set_var("FILESYSTEMS", "/red/nas1");
+        }
+        let d = trash_deadlines("alice").await;
+        unsafe {
+            std::env::remove_var("TRASH_DIR");
+            std::env::remove_var("FILESYSTEMS");
+        }
+        assert!(d.contains_key("/red/nas1/a"));
+        assert!(!d.contains_key("/red/old/b"), "no node will move it: no date to promise");
+    }
+
+    #[test]
+    fn render_email_body_tells_the_trash_date_and_keep() {
+        let after = std::collections::HashMap::from([("/tmp/a".to_string(), 1_800_000_000i64)]);
+        let body = render_email_body("admin", "alice", &[p("/tmp/a", 1), p("/tmp/b", 2)], None, &after);
+        let line_a = body.lines().find(|l| l.contains("/tmp/a")).unwrap();
+        assert!(line_a.contains("trash after 2027-01-15"), "{line_a}");
+        let line_b = body.lines().find(|l| l.contains("/tmp/b")).unwrap();
+        assert!(!line_b.contains("trash after"), "{line_b}");
+        assert!(body.contains("Keep"));
     }
 }

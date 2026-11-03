@@ -95,3 +95,29 @@ Crontab: `0 2 * * * python3 /opt/dutopia/trash_mover.py --api https://dutopia.ap
 - Local: `FILESYSTEMS=/tmp/fs1,/tmp/fs2 TRASH_TOKEN=x ./duapi du.db` → home shows fs1 and fs2 →
   trash a folder → `queue.json` gets the entry with `fs` → Keep removes it → run the script →
   it ends up as `/tmp/fs1/.trash/<date>/…/name.tar.zst`.
+
+## Implemented beyond the plan
+
+Found while building and reviewing it (see `deploy/README.md` §9):
+
+- **Safety of the root cron** (`script/trash_fsops.py`): every check, rename and
+  delete runs on O_NOFOLLOW file descriptors from the filesystem root, folders
+  are walked so one holding another owner's files or another mount is skipped,
+  a planted `<fs>/.trash` symlink is refused, owners below uid 1000 are never
+  moved, `--fs` allowlist, https only.
+- **Single owner per the DB**: a folder is queued only when the DB shows one
+  owner inside; `UNK` (UID with no account) is refused; backslashes refused.
+- **Nested items**: a path inside a queued folder is a 409; a folder absorbs
+  queued children of the same owner and filesystem.
+- **Per-node claim**: the cron reads FILESYSTEMS from `/api/health` and claims
+  only the filesystems it mounts (`?fs=`), so several cron nodes coexist.
+- **History** (`history.json`): claim records "claimed", the cron reports
+  moved/skipped/error in chunks, Keep records "kept". The panel's History tab
+  shows it; a late Keep says what happened; a moved item cannot be re-queued
+  until the next scan; due items of filesystems no longer listed are retired.
+- **Operations**: `--dry-run` (server confirms it applied it, `X-Trash-Dry-Run`),
+  single-instance lock, `--batch` reruns, `TRASH_UNDO_HOURS`, `--dev` for local
+  testing, restore instructions.
+- **UI**: rows show "in trash · keep" and toggle Keep; the Notify email gives
+  each queued item's trash date and how to Keep it.
+

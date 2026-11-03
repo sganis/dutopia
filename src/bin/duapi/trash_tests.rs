@@ -1,13 +1,14 @@
 // rs/src/bin/duapi/trash_tests.rs
 use super::*;
+use crate::trash_history::{claim_handler, split_due, ClaimQuery};
 use axum::body::to_bytes;
-use axum::http::HeaderValue;
+use axum::http::{HeaderMap, HeaderValue};
 use serial_test::serial;
 
-const LIMIT: usize = 1024 * 1024;
+pub(crate) const LIMIT: usize = 1024 * 1024;
 const FSS: &str = "/red/nas1,/red/nas2";
 
-fn claims(sub: &str, is_admin: bool, roots: &[&str]) -> Claims {
+pub(crate) fn claims(sub: &str, is_admin: bool, roots: &[&str]) -> Claims {
     Claims {
         sub: sub.into(),
         is_admin,
@@ -20,7 +21,7 @@ fn fss() -> Vec<String> {
     vec!["/red/nas1".into(), "/red/nas2".into(), "/red/nas2/deep".into()]
 }
 
-fn entry(path: &str, owner: &str, queued_at: i64) -> Entry {
+pub(crate) fn entry(path: &str, owner: &str, queued_at: i64) -> Entry {
     Entry {
         path: path.into(),
         size: 10,
@@ -31,19 +32,39 @@ fn entry(path: &str, owner: &str, queued_at: i64) -> Entry {
     }
 }
 
-/// Point TRASH_DIR at a fresh temp dir and set FILESYSTEMS. Keep the
-/// returned guard alive for the test.
-fn setup() -> tempfile::TempDir {
+/// Point TRASH_DIR at a fresh temp dir and set FILESYSTEMS and
+/// TRASH_TOKEN. Keep the returned guard alive for the test: dropping it
+/// removes the dir and unsets the vars, so later tests start clean.
+pub(crate) struct Env(tempfile::TempDir);
+
+const ENV_VARS: [&str; 4] = ["TRASH_DIR", "FILESYSTEMS", "TRASH_TOKEN", "TRASH_UNDO_HOURS"];
+
+impl Env {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        for v in ENV_VARS {
+            unsafe { std::env::remove_var(v) };
+        }
+    }
+}
+
+pub(crate) fn setup() -> Env {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("TRASH_DIR", dir.path());
         std::env::set_var("FILESYSTEMS", FSS);
         std::env::set_var("TRASH_TOKEN", "s3cret");
+        std::env::remove_var("TRASH_UNDO_HOURS");
     }
-    dir
+    Env(dir)
 }
 
-async fn add(c: &Claims, path: &str, owner: &str) -> StatusCode {
+pub(crate) async fn add(c: &Claims, path: &str, owner: &str) -> StatusCode {
     let req = AddReq { path: path.into(), size: 100, owner: owner.into() };
     add_handler(c.clone(), Json(req)).await.status()
 }
@@ -54,17 +75,25 @@ async fn list(c: &Claims) -> Vec<Entry> {
     serde_json::from_slice(&to_bytes(resp.into_body(), LIMIT).await.unwrap()).unwrap()
 }
 
-async fn keep(c: &Claims, path: Option<&str>) -> StatusCode {
+pub(crate) async fn keep(c: &Claims, path: Option<&str>) -> StatusCode {
     let q = KeepQuery { path: path.map(Into::into) };
     keep_handler(c.clone(), Query(q)).await.status()
 }
 
-async fn claim(auth: Option<&str>) -> (StatusCode, Vec<Entry>) {
+pub(crate) async fn claim(auth: Option<&str>) -> (StatusCode, Vec<Entry>) {
+    claim_with(auth, None).await
+}
+
+pub(crate) async fn claim_with(auth: Option<&str>, dry_run: Option<&str>) -> (StatusCode, Vec<Entry>) {
+    claim_q(auth, ClaimQuery { dry_run: dry_run.map(Into::into), fs: None }).await
+}
+
+pub(crate) async fn claim_q(auth: Option<&str>, q: ClaimQuery) -> (StatusCode, Vec<Entry>) {
     let mut headers = HeaderMap::new();
     if let Some(a) = auth {
         headers.insert("authorization", HeaderValue::from_str(a).unwrap());
     }
-    let resp = claim_handler(headers).await;
+    let resp = claim_handler(headers, Query(q)).await;
     let status = resp.status();
     let body = to_bytes(resp.into_body(), LIMIT).await.unwrap();
     (status, serde_json::from_slice(&body).unwrap_or_default())
@@ -256,35 +285,6 @@ async fn keep_removes_only_what_the_caller_may_manage() {
 
 #[tokio::test]
 #[serial]
-async fn claim_needs_the_token() {
-    let dir = setup();
-    save(dir.path(), &[entry("/red/nas1/a", "alice", 1)]).unwrap();
-    assert_eq!(claim(None).await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(claim(Some("Bearer wrong")).await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(claim(Some("s3cret")).await.0, StatusCode::UNAUTHORIZED);
-    unsafe { std::env::remove_var("TRASH_TOKEN") };
-    assert_eq!(claim(Some("Bearer ")).await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(load(dir.path()).unwrap().len(), 1); // nothing claimed
-}
-
-#[tokio::test]
-#[serial]
-async fn claim_returns_and_removes_only_old_entries() {
-    let dir = setup();
-    let now = chrono::Utc::now().timestamp();
-    let old = entry("/red/nas1/old", "alice", now - CLAIM_AFTER_SECS - 60);
-    let fresh = entry("/red/nas1/fresh", "alice", now - 60);
-    save(dir.path(), &[old.clone(), fresh.clone()]).unwrap();
-    let (status, got) = claim(Some("Bearer s3cret")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(got, vec![old]);
-    assert_eq!(load(dir.path()).unwrap(), vec![fresh]);
-    // A second run finds nothing new.
-    assert!(claim(Some("Bearer s3cret")).await.1.is_empty());
-}
-
-#[tokio::test]
-#[serial]
 async fn add_over_someone_elses_entry_is_a_conflict() {
     let dir = setup();
     save(dir.path(), &[entry("/red/nas1/a", "alice", 7)]).unwrap();
@@ -333,18 +333,46 @@ async fn add_refuses_unknown_owner() {
     assert_eq!(add(&root, "/red/nas1/old", "UNK").await, StatusCode::BAD_REQUEST);
 }
 
+// ---- backslashes, nested entries ----
+
 #[tokio::test]
 #[serial]
-async fn undo_hours_env_shortens_the_wait() {
+async fn add_rejects_backslashes() {
+    let _dir = setup();
+    let root = claims("root", true, &[]);
+    // `\` switches normalize_path to Windows mode, where `/./` is not folded.
+    assert_eq!(add(&root, "/red/nas1/./.trash/x\\y", "bob").await, StatusCode::BAD_REQUEST);
+    assert_eq!(add(&root, "/red/nas1/.\\", "bob").await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial]
+async fn add_inside_a_queued_folder_is_a_conflict() {
     let dir = setup();
-    let now = chrono::Utc::now().timestamp();
-    let fresh = entry("/red/nas1/fresh", "alice", now - 60);
-    save(dir.path(), &[fresh.clone()]).unwrap();
-    unsafe { std::env::set_var("TRASH_UNDO_HOURS", "0") };
-    assert_eq!(undo_hours(), 0);
-    let (status, got) = claim(Some("Bearer s3cret")).await;
-    unsafe { std::env::remove_var("TRASH_UNDO_HOURS") };
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(got, vec![fresh]);
-    assert_eq!(undo_hours(), 24);
+    save(dir.path(), &[entry("/red/nas1/a", "alice", 1)]).unwrap();
+    let alice = claims("alice", false, &[]);
+    assert_eq!(add(&alice, "/red/nas1/a/b", "alice").await, StatusCode::CONFLICT);
+    assert_eq!(load(dir.path()).unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn add_of_a_parent_absorbs_queued_children() {
+    let dir = setup();
+    save(dir.path(), &[entry("/red/nas1/a/b", "alice", 1), entry("/red/nas1/ab", "alice", 1)]).unwrap();
+    let alice = claims("alice", false, &[]);
+    assert_eq!(add(&alice, "/red/nas1/a", "alice").await, StatusCode::CREATED);
+    let paths: Vec<String> = load(dir.path()).unwrap().into_iter().map(|e| e.path).collect();
+    // /red/nas1/ab is a sibling, not a child.
+    assert_eq!(paths, vec!["/red/nas1/ab", "/red/nas1/a"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn add_of_a_parent_over_someone_elses_child_is_a_conflict() {
+    let dir = setup();
+    save(dir.path(), &[entry("/red/nas1/a/b", "bob", 1)]).unwrap();
+    let alice = claims("alice", false, &[]);
+    assert_eq!(add(&alice, "/red/nas1/a", "alice").await, StatusCode::CONFLICT);
+    assert_eq!(load(dir.path()).unwrap()[0].owner, "bob");
 }

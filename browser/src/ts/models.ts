@@ -61,6 +61,16 @@ export type FilesResult = {
 export type SortKey = "disk" | "size" | "count";
 export type AgeFilterType = -1 | 0 | 1 | 2;
 
+/** What the nightly cron did with a claimed item (trash_history.rs). */
+export type TrashOutcome = TrashEntry & {
+  /** claimed: the nightly run is moving it; kept: someone pressed Keep. */
+  status: "claimed" | "moved" | "skipped" | "error" | "kept";
+  detail: string;
+  dest: string | null;
+  /** Unix seconds. */
+  done_at: number;
+};
+
 /** One queued item of the server-side trash (src/bin/duapi/trash.rs). */
 export type TrashEntry = {
   path: string;

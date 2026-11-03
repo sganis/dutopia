@@ -25,6 +25,7 @@
   import {
     cleanupQueue,
     loadCleanupQueue,
+    loadTrashHistory,
     removeFromCleanupQueue,
     distinctOwners,
     filteredItems,
@@ -45,7 +46,16 @@
   let selectedUser = $state<string | null>(null); // null == All users
   let working = $state(false);
 
-  const owners = $derived(distinctOwners());
+  /** "queued": the cart (Keep possible). "history": what the nightly run did. */
+  let tab = $state<"queued" | "history">("queued");
+  const owners = $derived(
+    tab === "queued"
+      ? distinctOwners()
+      : [...new Set(cleanupQueue.history.map((h) => h.owner))].sort(),
+  );
+  const historyItems = $derived(
+    cleanupQueue.history.filter((h) => !selectedUser || h.owner === selectedUser),
+  );
   const items = $derived(filteredItems(selectedUser));
   const totals = $derived(totalsFor(selectedUser));
 
@@ -63,6 +73,7 @@
   $effect(() => {
     if (cleanupQueue.panelOpen) {
       loadCleanupQueue().catch((err) => onToast?.(err?.message ?? "Could not load the trash"));
+      loadTrashHistory().catch((err) => onToast?.(err?.message ?? "Could not load the trash history"));
     }
   });
 
@@ -79,6 +90,7 @@
     } catch (err: any) {
       onToast?.(err?.message ?? "Keep failed");
       await loadCleanupQueue().catch(() => {});
+      await loadTrashHistory().catch(() => {});
     } finally {
       working = false;
     }
@@ -120,9 +132,9 @@
   }
 
   const notifyDisabled = $derived(
-    !State.isAdmin || !selectedUser || working || !api.smtpConfigured,
+    tab !== "queued" || !State.isAdmin || !selectedUser || working || !api.smtpConfigured,
   );
-  const downloadDisabled = $derived(!selectedUser || working || items.length === 0);
+  const downloadDisabled = $derived(tab !== "queued" || !selectedUser || working || items.length === 0);
 </script>
 
 {#if cleanupQueue.panelOpen}
@@ -154,6 +166,26 @@
         </button>
       </div>
 
+      <div class="flex gap-1 mb-3 text-sm" role="tablist">
+        <button
+          role="tab"
+          aria-selected={tab === "queued"}
+          class="px-3 py-1 rounded {tab === 'queued' ? 'bg-gray-600 text-gray-100' : 'text-gray-400 hover:bg-gray-700'}"
+          onclick={() => (tab = "queued")}
+        >
+          Queued ({cleanupQueue.items.length})
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "history"}
+          class="px-3 py-1 rounded {tab === 'history' ? 'bg-gray-600 text-gray-100' : 'text-gray-400 hover:bg-gray-700'}"
+          onclick={() => (tab = "history")}
+          title="What the nightly run did with items that left the queue"
+        >
+          History
+        </button>
+      </div>
+
       <div class="flex items-center gap-3 mb-3">
         <label class="text-sm text-gray-300" for="cleanup-user-filter">User:</label>
         <select
@@ -167,7 +199,7 @@
             <option value={owner}>{owner}</option>
           {/each}
         </select>
-        <div class="ml-auto text-sm text-gray-300">
+        <div class="ml-auto text-sm text-gray-300" class:invisible={tab !== "queued"}>
           <span class="text-gray-100 font-medium">{totals.count}</span>
           item{totals.count === 1 ? "" : "s"}
           &nbsp;•&nbsp;
@@ -175,6 +207,36 @@
         </div>
       </div>
 
+      {#if tab === "history"}
+      <div class="flex flex-col gap-1 overflow-y-auto flex-1 border border-gray-700 rounded bg-gray-900/40 p-1">
+        {#each historyItems as h, i (h.path + h.done_at + i)}
+          <div class="p-2 rounded hover:bg-gray-700/40">
+            <div class="text-sm text-gray-100 truncate" title={h.path}>{h.path}</div>
+            <div class="text-xs text-gray-400">
+              {#if h.status === "moved"}
+                <span class="text-emerald-400">moved</span>
+                {#if h.dest}&nbsp;to <span class="text-gray-300" title={h.dest}>{h.dest}</span>{/if}
+              {:else if h.status === "claimed"}
+                <span class="text-sky-400">being moved</span> by the nightly run
+              {:else if h.status === "kept"}
+                <span class="text-gray-300">kept</span>{#if h.detail}&nbsp;({h.detail}){/if}
+              {:else if h.status === "skipped"}
+                <span class="text-amber-400">skipped</span>: {h.detail}
+              {:else}
+                <span class="text-red-400">error</span>: {h.detail}
+              {/if}
+              &nbsp;•&nbsp; {fmtDate(h.done_at * 1000)}
+              &nbsp;•&nbsp; {humanBytes(h.size || 0)}
+              &nbsp;•&nbsp; <span class="text-gray-300">{h.owner}</span>
+            </div>
+          </div>
+        {:else}
+          <div class="text-sm text-gray-400 text-center py-8">
+            Nothing has left the queue yet. The nightly run lists here what it moved or skipped.
+          </div>
+        {/each}
+      </div>
+      {:else}
       <div class="flex flex-col gap-1 overflow-y-auto flex-1 border border-gray-700 rounded bg-gray-900/40 p-1">
         {#each items as item (item.path)}
           <div class="flex items-center gap-2 p-2 rounded hover:bg-gray-700/40">
@@ -216,6 +278,7 @@
           </div>
         {/each}
       </div>
+      {/if}
 
       <div class="flex justify-end items-center gap-2 mt-3">
         <button

@@ -22,6 +22,7 @@
     onCopyPath,
     onDelete,
     canDelete,
+    queued = false,
   }: {
     file: ScannedFile;
     sortBy: SortKey;
@@ -31,6 +32,8 @@
     onDelete?: (path: string, size: number, owner: string) => void;
     /** Extra gate on the trash icon (web: the trash tiers + FILESYSTEMS). */
     canDelete?: (path: string, owner: string) => boolean;
+    /** Already in the trash cart: the trash icon shows it and toggles Keep. */
+    queued?: boolean;
   } = $props();
 
   const toNum = (v: any) => {
@@ -73,6 +76,7 @@
           <ActionBar
             onCopy={onCopyPath ? () => onCopyPath(file.path) : undefined}
             onDelete={onDelete && (canDelete?.(file.path, file.owner) ?? true) ? () => onDelete(file.path, toNum(file.size), file.owner) : undefined}
+            deleteActive={queued}
           />
           <span class="truncate">{file.owner}</span>
         </div>

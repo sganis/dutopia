@@ -32,6 +32,8 @@ mod oidc;
 mod query;
 mod shutdown;
 mod trash;
+mod trash_history;
+mod trash_store;
 
 use db::DbPool;
 use handler::{get_files_handler, get_folders_handler, health_handler, login_handler, users_handler};
@@ -290,7 +292,9 @@ async fn main() -> Result<()> {
                 .post(trash::add_handler)
                 .delete(trash::keep_handler),
         )
-        .route("/trash/claim", post(trash::claim_handler))
+        .route("/trash/claim", post(trash_history::claim_handler))
+        .route("/trash/report", post(trash_history::report_handler))
+        .route("/trash/history", get(trash_history::history_handler))
         .fallback(api_not_found);
 
     let frontend = ServeDir::new(&static_dir)

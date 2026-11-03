@@ -23,7 +23,7 @@
   import CleanupPanel from "../lib/CleanupPanel.svelte";
   import { scanStatus } from "../ts/scan.svelte";
   import { deleteQueue, addToQueue } from "../ts/deleteQueue.svelte";
-  import { cleanupQueue, addToCleanupQueue, loadCleanupQueue } from "../ts/cleanupQueue.svelte";
+  import { cleanupQueue, toggleTrash, isQueued, loadCleanupQueue } from "../ts/cleanupQueue.svelte";
   import { canTrash, inRoot } from "../ts/trash";
 
   //#region types
@@ -634,10 +634,13 @@
       return;
     }
     try {
-      await addToCleanupQueue(p, size, owner);
-      showToast(`Queued for trash (${cleanupQueue.items.length})`);
+      const done = await toggleTrash(p, size, owner);
+      showToast(done === "kept"
+        ? "Kept: taken out of the trash"
+        : `Queued for trash (${cleanupQueue.items.length})`);
     } catch (err: any) {
-      showToast(err?.message ?? "Could not queue for trash");
+      showToast(err?.message ?? "Trash request failed");
+      loadCleanupQueue().catch(() => {});
     }
   }
 
@@ -794,7 +797,6 @@
         class="btn relative"
         onclick={() => (cleanupQueue.panelOpen = true)}
         title="Review trash"
-        disabled={cleanupQueue.items.length === 0}
       >
         <div class="flex items-center gap-1">
           <span class="material-symbols-outlined">delete_sweep</span>
@@ -889,6 +891,7 @@
           onTerminal={__DESKTOP__ ? openTerminal : undefined}
           onDelete={targetForDeletion}
           canDelete={__DESKTOP__ ? undefined : canDeleteWeb}
+          queued={!__DESKTOP__ && isQueued(folder.path)}
           onUserHover={showTip}
           onUserMove={moveTip}
           onUserLeave={hideTip}
@@ -908,6 +911,7 @@
           onCopyPath={copyPath}
           onDelete={targetForDeletion}
           canDelete={__DESKTOP__ ? undefined : canDeleteWeb}
+          queued={!__DESKTOP__ && isQueued(file.path)}
         />
       {/each}
 

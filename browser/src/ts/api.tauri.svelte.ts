@@ -9,7 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile, TrashEntry } from "./models";
+import type { FilesResult, ScannedFile, TrashEntry, TrashOutcome } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
 export type RawFolder = { path: string; users: Record<string, Record<"0" | "1" | "2", AgeMini>> };
@@ -122,6 +122,7 @@ class Api {
     throw new Error(WEB_ONLY);
   }
   async trashKeep(_path: string): Promise<TrashEntry> { throw new Error(WEB_ONLY); }
+  async trashHistory(): Promise<TrashOutcome[]> { throw new Error(WEB_ONLY); }
   async cleanupScript(_username: string, _paths: { path: string; size: number }[]): Promise<Blob> {
     throw new Error(WEB_ONLY);
   }

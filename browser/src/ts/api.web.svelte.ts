@@ -2,7 +2,7 @@
 import { State, API_URL } from "./store.svelte";
 import { fetchCached, initDbVersion } from './cache.js';
 import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile, TrashEntry } from "./models";
+import type { FilesResult, ScannedFile, TrashEntry, TrashOutcome } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
 export type RawFolder = { path: string; users: Record<string, Record<'0'|'1'|'2', AgeMini>> };
@@ -202,6 +202,11 @@ class Api {
   /** POST /api/trash: queue an item; returns the stored entry. */
   async trashAdd(path: string, size: number, owner: string): Promise<TrashEntry> {
     return this.trashFetch<TrashEntry>("trash", "POST", { path, size, owner });
+  }
+
+  /** GET /api/trash/history: what the nightly run did, newest first. */
+  async trashHistory(): Promise<TrashOutcome[]> {
+    return this.trashFetch<TrashOutcome[]>("trash/history", "GET");
   }
 
   /** DELETE /api/trash?path= — Keep (the 1-day undo). */

@@ -13,11 +13,15 @@
     onReveal,
     onTerminal,
     onDelete,
+    deleteActive = false,
   }: {
     onCopy?: () => void;
     onReveal?: () => void;
     onTerminal?: () => void;
     onDelete?: () => void;
+    /** The item is already queued for the trash: the icon stays lit and a
+     *  click takes it back out (Keep). */
+    deleteActive?: boolean;
   } = $props();
 
   function handle(e: MouseEvent, fn?: () => void) {
@@ -66,11 +70,14 @@
     <button
       type="button"
       class="action-btn action-btn-danger"
-      title="Target for deletion"
-      aria-label="Target for deletion"
+      class:action-btn-active={deleteActive}
+      title={deleteActive ? "Queued for the trash: click to keep it" : "Target for deletion"}
+      aria-label={deleteActive ? "Keep (take out of the trash)" : "Target for deletion"}
+      aria-pressed={deleteActive}
       onclick={(e) => handle(e, onDelete)}
     >
-      <span class="material-symbols-outlined">delete</span>
+      <span class="material-symbols-outlined">{deleteActive ? "delete_forever" : "delete"}</span>
+      {#if deleteActive}<span class="action-label">in trash · keep</span>{/if}
     </button>
   {/if}
 </div>
@@ -97,5 +104,21 @@
   }
   .action-btn-danger:hover {
     background-color: rgba(239, 68, 68, 0.25);
+  }
+  /* Readable on any user color: a dark pill with a label. */
+  .action-btn-active {
+    opacity: 1;
+    gap: 3px;
+    padding: 1px 6px 1px 4px;
+    color: #fff;
+    background-color: rgba(0, 0, 0, 0.55);
+  }
+  .action-btn-active:hover {
+    background-color: rgba(0, 0, 0, 0.75);
+  }
+  .action-label {
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
   }
 </style>

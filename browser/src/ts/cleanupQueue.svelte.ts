@@ -10,8 +10,9 @@
 // pattern as the main app's user dropdown) and the script/notify endpoints
 // know which user to target.
 
+import { SvelteSet } from "svelte/reactivity";
 import { api } from "$api";
-import type { TrashEntry } from "./models";
+import type { TrashEntry, TrashOutcome } from "./models";
 
 export type CleanupStatus = "queued" | "requesting" | "requested" | "error";
 
@@ -22,8 +23,20 @@ export type CleanupItem = TrashEntry & {
 
 export const cleanupQueue = $state({
   items: [] as CleanupItem[],
+  /** What the nightly run did with items that left the queue, newest first. */
+  history: [] as TrashOutcome[],
   panelOpen: false,
 });
+
+/** Paths in the cart, for the per-row "in trash" check: a Set so a 2000-row
+ *  listing does not scan a 20k-item admin cart once per row. */
+const queuedPaths = new SvelteSet<string>();
+
+function setItems(items: CleanupItem[]) {
+  cleanupQueue.items = items;
+  queuedPaths.clear();
+  for (const i of items) queuedPaths.add(i.path);
+}
 
 function toItem(e: TrashEntry): CleanupItem {
   return { ...e, status: "queued" };
@@ -32,22 +45,40 @@ function toItem(e: TrashEntry): CleanupItem {
 /** Replace the cart with the server's view of it. */
 export async function loadCleanupQueue(): Promise<void> {
   const entries = await api.trashList();
-  cleanupQueue.items = entries.map(toItem);
+  setItems(entries.map(toItem));
 }
 
-/** Queue an item on the server. Throws (cart unchanged) when refused. */
+/** Replace the history with the server's (GET /api/trash/history). */
+export async function loadTrashHistory(): Promise<void> {
+  cleanupQueue.history = await api.trashHistory();
+}
+
+/** Queue an item on the server, then re-read the cart: a folder absorbs
+ *  its queued children. Throws (cart unchanged) when refused. */
 export async function addToCleanupQueue(path: string, size: number, owner: string): Promise<void> {
   if (!owner) return;
-  const e = await api.trashAdd(path, size, owner);
-  if (!cleanupQueue.items.some((i) => i.path === e.path)) {
-    cleanupQueue.items.push(toItem(e));
+  await api.trashAdd(path, size, owner);
+  await loadCleanupQueue();
+}
+
+export function isQueued(path: string): boolean {
+  return queuedPaths.has(path);
+}
+
+/** The row's trash icon: queue the item, or Keep it when already queued. */
+export async function toggleTrash(path: string, size: number, owner: string): Promise<"queued" | "kept"> {
+  if (isQueued(path)) {
+    await removeFromCleanupQueue(path);
+    return "kept";
   }
+  await addToCleanupQueue(path, size, owner);
+  return "queued";
 }
 
 /** Per-row "Keep": take the item out of the server queue (the undo). */
 export async function removeFromCleanupQueue(path: string): Promise<void> {
   await api.trashKeep(path);
-  cleanupQueue.items = cleanupQueue.items.filter((i) => i.path !== path);
+  setItems(cleanupQueue.items.filter((i) => i.path !== path));
 }
 
 /** Distinct owners currently in the queue, sorted alphabetically for the

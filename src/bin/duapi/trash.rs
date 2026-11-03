@@ -12,18 +12,14 @@
 // The queue is `$TRASH_DIR/queue.json` (default /data/trash, the PVC), one
 // JSON array guarded by a process-wide mutex and replaced by tmp + rename.
 
-use anyhow::Context;
 use axum::{
     extract::Query,
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use dutopia::auth::{AuthError, Claims};
 use dutopia::authz::path_in_roots;
@@ -31,9 +27,15 @@ use dutopia::filesystems::fs_of;
 
 use crate::cleanup::{validate, PathItem};
 use crate::query::normalize_path;
+use crate::trash_history::{keep_too_late, latest_for, readd_blocked, Outcome};
+#[cfg(test)]
+pub use crate::trash_store::save;
+pub use crate::trash_store::{load, trash_dir};
+use crate::trash_store::{with_both, with_queue, Changed};
 
 /// Default undo window: entries wait this long before the cron may claim them.
 pub const DEFAULT_UNDO_HOURS: i64 = 24;
+#[cfg(test)]
 pub const CLAIM_AFTER_SECS: i64 = DEFAULT_UNDO_HOURS * 60 * 60;
 
 /// The undo window in hours: `TRASH_UNDO_HOURS` (0 claims at once, for local
@@ -47,7 +49,6 @@ pub fn undo_hours() -> i64 {
 }
 /// Bound on queue.json so a runaway client cannot grow it without limit.
 const MAX_ENTRIES: usize = 20_000;
-const QUEUE_FILE: &str = "queue.json";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -150,84 +151,6 @@ async fn check_db_owner(path: &str, owner: &str, actor: &str) -> Result<(), Resp
     }
 }
 
-/// Split `entries` into (claimed, kept): claimed are those queued at least
-/// `after_secs` before `now`.
-pub fn split_due(entries: Vec<Entry>, now: i64, after_secs: i64) -> (Vec<Entry>, Vec<Entry>) {
-    entries
-        .into_iter()
-        .partition(|e| now - e.queued_at >= after_secs)
-}
-
-/// Load the queue (missing file = empty).
-pub fn load(dir: &Path) -> anyhow::Result<Vec<Entry>> {
-    let file = dir.join(QUEUE_FILE);
-    match std::fs::read_to_string(&file) {
-        Ok(text) => serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", file.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
-    }
-}
-
-/// Replace the queue atomically (write tmp, fsync, rename).
-pub fn save(dir: &Path, entries: &[Entry]) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file = dir.join(QUEUE_FILE);
-    let tmp = dir.join(format!("{QUEUE_FILE}.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
-        serde_json::to_writer_pretty(&mut f, entries)?;
-        f.write_all(b"\n")?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, &file)
-        .with_context(|| format!("renaming {} to {}", tmp.display(), file.display()))
-}
-
-pub fn trash_dir() -> PathBuf {
-    std::env::var("TRASH_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/data/trash"))
-}
-
-/// One writer at a time on queue.json (one duapi pod).
-static LOCK: Mutex<()> = Mutex::new(());
-
-/// Run `f` on the loaded queue under the lock, in a blocking task; save the
-/// queue when `f` reports a change. IO errors become a 500 response.
-async fn with_queue<T, F>(f: F) -> Result<T, Response>
-where
-    F: FnOnce(&mut Vec<Entry>) -> (T, bool) + Send + 'static,
-    T: Send + 'static,
-{
-    let dir = trash_dir();
-    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut queue = load(&dir)?;
-        let (out, changed) = f(&mut queue);
-        if changed {
-            save(&dir, &queue)?;
-        }
-        Ok(out)
-    })
-    .await;
-    match res {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => {
-            tracing::error!(err = %format!("{e:#}"), "500 trash queue error");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("trash queue error: {e:#}"))
-                .into_response())
-        }
-        Err(join_err) => {
-            tracing::error!(err = %join_err, "500 Task Join Error /api/trash");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, "task error").into_response())
-        }
-    }
-}
-
 fn bad_request(actor: &str, msg: String) -> Response {
     tracing::warn!(actor = %actor, %msg, "400 Bad Request /api/trash");
     (StatusCode::BAD_REQUEST, msg).into_response()
@@ -263,6 +186,11 @@ pub async fn add_handler(claims: Claims, Json(req): Json<AddReq>) -> Response {
         tracing::warn!(actor = %claims.sub, %msg, "{code} POST /api/trash invalid");
         return (code, msg).into_response();
     }
+    // FILESYSTEMS are Unix mount points; a backslash would switch normalize_path
+    // to Windows rules and let `/./.trash` or `/.` slip past check_target.
+    if req.path.contains('\\') {
+        return bad_request(&claims.sub, format!("invalid path (backslash): {}", req.path));
+    }
     let path = match normalize_path(&req.path) {
         Some(p) if p.starts_with('/') => p,
         _ => return bad_request(&claims.sub, format!("invalid path: {}", req.path)),
@@ -294,42 +222,81 @@ pub async fn add_handler(claims: Claims, Json(req): Json<AddReq>) -> Response {
         queued_at: Utc::now().timestamp(),
     };
     let actor = claims.sub.clone();
-    let res = with_queue(move |q| {
-        if let Some(e) = q.iter().find(|e| e.path == entry.path) {
-            return if can_manage(&claims, &e.owner, &e.path) {
-                ((StatusCode::OK, Some(e.clone())), false)
-            } else {
-                ((StatusCode::CONFLICT, None), false)
-            };
+    let built_at = crate::db_version().and_then(|v| v.parse::<i64>().ok());
+    let res = with_both(move |q, history| {
+        if let Some(why) = readd_blocked(latest_for(history, &entry.path, &claims), built_at) {
+            return (Err((StatusCode::CONFLICT, why)), Changed::default());
         }
-        if q.len() >= MAX_ENTRIES {
-            return ((StatusCode::INSUFFICIENT_STORAGE, None), false);
+        match place(q, entry, &claims) {
+            Ok((code, e)) => {
+                let queue = code == StatusCode::CREATED;
+                (Ok((code, e)), Changed { queue, history: false })
+            }
+            Err(err) => (Err(err), Changed::default()),
         }
-        q.push(entry.clone());
-        ((StatusCode::CREATED, Some(entry)), true)
     })
     .await;
     match res {
-        Ok((code, Some(e))) => {
+        Ok(Ok((code, e))) => {
             tracing::info!(actor = %actor, path = %e.path, owner = %e.owner, "{code} POST /api/trash");
             (code, Json(e)).into_response()
         }
-        Ok((code, None)) => {
-            tracing::warn!(actor = %actor, "{code} POST /api/trash");
-            let msg = if code == StatusCode::CONFLICT {
-                "already queued by someone else".to_string()
-            } else {
-                format!("trash queue is full ({MAX_ENTRIES} items)")
-            };
+        Ok(Err((code, msg))) => {
+            tracing::warn!(actor = %actor, %msg, "{code} POST /api/trash");
             (code, msg).into_response()
         }
         Err(resp) => resp,
     }
 }
 
+/// Put `entry` in the queue `q`. 200 with the existing entry when the path
+/// is already queued; 409 when it lies inside a queued folder, or when that
+/// entry is someone else's. Queued children of a new folder are absorbed
+/// into it (one move instead of several) when they have the same owner and
+/// filesystem; any other child is a 409 (absorbing it would drop someone
+/// else's request). Messages name a conflicting path only when the caller
+/// may manage it.
+fn place(
+    q: &mut Vec<Entry>,
+    entry: Entry,
+    claims: &Claims,
+) -> Result<(StatusCode, Entry), (StatusCode, String)> {
+    let inside = |child: &str, parent: &str| path_in_roots(std::slice::from_ref(&parent.to_string()), child);
+    let conflict = |msg: String| Err((StatusCode::CONFLICT, msg));
+    if let Some(e) = q.iter().find(|e| e.path == entry.path) {
+        return if can_manage(claims, &e.owner, &e.path) {
+            Ok((StatusCode::OK, e.clone()))
+        } else {
+            conflict("already queued by someone else".into())
+        };
+    }
+    if let Some(p) = q.iter().find(|e| inside(&entry.path, &e.path)) {
+        return conflict(if can_manage(claims, &p.owner, &p.path) {
+            format!("already in the trash: inside queued {}", p.path)
+        } else {
+            "a folder above it is already queued for the trash".into()
+        });
+    }
+    let children: Vec<&Entry> = q.iter().filter(|e| inside(&e.path, &entry.path)).collect();
+    if let Some(c) = children.iter().find(|c| c.owner != entry.owner || c.fs != entry.fs) {
+        return conflict(if can_manage(claims, &c.owner, &c.path) {
+            format!("{} is queued for another owner or filesystem: keep it first", c.path)
+        } else {
+            "something inside it is queued by someone else".into()
+        });
+    }
+    if q.len() + 1 - children.len() > MAX_ENTRIES {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, format!("trash queue is full ({MAX_ENTRIES} items)")));
+    }
+    q.retain(|e| !inside(&e.path, &entry.path));
+    q.push(entry.clone());
+    Ok((StatusCode::CREATED, entry))
+}
+
 enum KeepOutcome {
     Kept(Entry),
-    NotFound,
+    /// Not queued: the answer explains what became of it.
+    Gone(Response),
     Forbidden,
 }
 
@@ -342,12 +309,21 @@ pub async fn keep_handler(claims: Claims, Query(q): Query<KeepQuery>) -> Respons
         return bad_request(&claims.sub, format!("invalid path: {raw}"));
     };
     let actor = claims.sub.clone();
-    let res = with_queue(move |queue| match queue.iter().position(|e| e.path == path) {
-        None => (KeepOutcome::NotFound, false),
-        Some(i) if !can_manage(&claims, &queue[i].owner, &queue[i].path) => {
-            (KeepOutcome::Forbidden, false)
+    let now = Utc::now().timestamp();
+    let res = with_both(move |queue, history| match queue.iter().position(|e| e.path == path) {
+        None => {
+            let answer = keep_too_late(latest_for(history, &path, &claims));
+            (KeepOutcome::Gone(answer), Changed::default())
         }
-        Some(i) => (KeepOutcome::Kept(queue.remove(i)), true),
+        Some(i) if !can_manage(&claims, &queue[i].owner, &queue[i].path) => {
+            (KeepOutcome::Forbidden, Changed::default())
+        }
+        Some(i) => {
+            let e = queue.remove(i);
+            let who = format!("kept by {}", claims.sub);
+            history.push(Outcome::new(e.clone(), "kept", who, now));
+            (KeepOutcome::Kept(e), Changed { queue: true, history: true })
+        }
     })
     .await;
     match res {
@@ -355,7 +331,7 @@ pub async fn keep_handler(claims: Claims, Query(q): Query<KeepQuery>) -> Respons
             tracing::info!(actor = %actor, path = %e.path, "200 OK DELETE /api/trash (kept)");
             Json(e).into_response()
         }
-        Ok(KeepOutcome::NotFound) => (StatusCode::NOT_FOUND, "not in the trash queue").into_response(),
+        Ok(KeepOutcome::Gone(answer)) => answer,
         Ok(KeepOutcome::Forbidden) => {
             tracing::warn!(actor = %actor, "403 Forbidden DELETE /api/trash");
             AuthError::Forbidden.into_response()
@@ -364,54 +340,6 @@ pub async fn keep_handler(claims: Claims, Query(q): Query<KeepQuery>) -> Respons
     }
 }
 
-/// Constant-time byte comparison for the cron token.
-fn same_token(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-/// POST /api/trash/claim — `Authorization: Bearer $TRASH_TOKEN` (not a user
-/// JWT). Returns the entries queued over `undo_hours()` ago and removes them from the
-/// queue: from here on they belong to the cron. 401 when TRASH_TOKEN is
-/// unset or does not match.
-pub async fn claim_handler(headers: HeaderMap) -> Response {
-    let expected = std::env::var("TRASH_TOKEN")
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
-    let given = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim);
-    match (expected, given) {
-        (Some(e), Some(g)) if same_token(e.as_bytes(), g.as_bytes()) => {}
-        (None, _) => {
-            tracing::warn!("401 POST /api/trash/claim: TRASH_TOKEN is not set");
-            return (StatusCode::UNAUTHORIZED, "trash claim disabled").into_response();
-        }
-        _ => {
-            tracing::warn!("401 POST /api/trash/claim: bad token");
-            return (StatusCode::UNAUTHORIZED, "invalid trash token").into_response();
-        }
-    }
-    let now = Utc::now().timestamp();
-    let after_secs = undo_hours() * 60 * 60;
-    let res = with_queue(move |q| {
-        let (due, kept) = split_due(std::mem::take(q), now, after_secs);
-        *q = kept;
-        let changed = !due.is_empty();
-        (due, changed)
-    })
-    .await;
-    match res {
-        Ok(due) => {
-            tracing::info!(items = due.len(), "200 OK POST /api/trash/claim");
-            Json(due).into_response()
-        }
-        Err(resp) => resp,
-    }
-}
-
 #[cfg(test)]
 #[path = "trash_tests.rs"]
-mod tests;
+pub(crate) mod tests;

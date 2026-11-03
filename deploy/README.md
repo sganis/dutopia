@@ -139,6 +139,7 @@ On that node, as root (Python 3, GNU tar and zstd):
 
 ```bash
 install -D -m 0755 script/trash_mover.py /opt/dutopia/trash_mover.py
+install -D -m 0644 script/trash_fsops.py /opt/dutopia/trash_fsops.py  # next to it
 install -D -m 0600 trash.token /etc/dutopia/trash.token   # same value as the Secret
 crontab -e
 0 2 * * * python3 /opt/dutopia/trash_mover.py --api https://dutopia.apps.ocp.corp.local --token-file /etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2
@@ -151,12 +152,52 @@ another owner's files or another mount, paths reached through a symlink, and
 a `<fs>/.trash` that is a symlink or not root's. The node must mount the
 filesystems with root access (no `root_squash`), or the renames fail.
 
+Each node claims only the items of the FILESYSTEMS entries it mounts (it
+reads the list from `/api/health`), so with several cron nodes, each one takes
+its own filesystems and leaves the rest queued. One run at a time per node
+(`/var/lib/dutopia-trash/.lock`).
+
+Claiming records each item as *being moved*; after the run the cron reports
+what it did (`POST /api/trash/report`, in chunks of 100). The trash panel's
+**History** tab shows each item as being moved, moved (and where to), skipped
+(and why: gone, not owned by its owner any more, a folder holding other
+users' files, …), failed, or kept (and by whom). Keep on an item the cron
+already took says what happened instead of failing silently, and an item the
+cron moved cannot be queued again until the next scan drops it from the
+listing. Due items of a filesystem removed from FILESYSTEMS are retired as
+skipped (no node would ever take them).
+
+**Upgrade duapi before the cron.** A cron asks the server to confirm
+`--dry-run` and the per-node filter; against an older duapi that ignores
+them, a dry run would really claim the items, so the cron stops, saves them
+to the state dir and tells you to rerun with `--batch` after upgrading.
+
+Check before the first real run, as root: it lists what it would move or
+purge and changes nothing (the items stay queued):
+
+```bash
+python3 /opt/dutopia/trash_mover.py --api https://dutopia.apps.ocp.corp.local \
+  --token-file /etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2 --dry-run
+```
+
 Each run saves what it claimed to `/var/lib/dutopia-trash/<date>.json`; if a
 run dies halfway, rerun that batch with `--batch /var/lib/dutopia-trash/<date>.json`.
-Items that are gone, no longer owned by their owner, or on a filesystem not
-mounted on the node are skipped (logged as `[skip]`). Add `--cafile` when the
-Route uses a private CA. Test it by hand first: `python3 /opt/dutopia/trash_mover.py
---api ... --token-file ...` claims only items queued over 24h ago.
+Add `--cafile` when the Route uses a private CA. `TRASH_UNDO_HOURS` (duapi,
+default 24) sets how long Keep can undo.
+
+**Restore** (admins, until the 30-day purge). The trash keeps the path under
+`<fs>/.trash/<date>/`; History shows the exact archive. A folder comes back
+with its owners and modes:
+
+```bash
+tar --use-compress-program 'zstd -d' -xpf /red/nas1/.trash/2026-11-04/proj/run1.tar.zst -C /red/nas1/proj
+mv /red/nas1/.trash/2026-11-04/proj/file.dat /red/nas1/proj/   # a single file
+```
+
+**Local test** (macOS/Linux, no root, no mounts): start duapi with
+`FILESYSTEMS=<dirs> TRASH_TOKEN=x TRASH_UNDO_HOURS=0`, queue something in the
+UI, then `TRASH_TOKEN=x python3 script/trash_mover.py --dev --api http://localhost:8080`
+(add `--dry-run` to only look).
 
 ---
 

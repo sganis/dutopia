@@ -17,8 +17,59 @@ import trash_mover as tm  # noqa: E402
 
 ME = pwd.getpwuid(os.geteuid()).pw_name
 # Tests run as a normal user, whose uid may be below the production floor.
-tm.MIN_UID = 0
+tm.fsops.MIN_UID = 0
 TODAY = datetime.date(2026, 11, 4)
+
+
+class FakeApi:
+    """A tiny duapi stand-in: GET /api/health lists `filesystems`, POST
+    /api/trash/claim returns `items`, POST /api/trash/report records the
+    body. Every request is kept in `requests` as (method, path, body)."""
+
+    def __init__(self, filesystems=(), items=(), honor=True):
+        self.filesystems, self.items, self.requests = list(filesystems), list(items), []
+        # honor=False plays an older duapi that ignores ?dry_run and ?fs.
+        self.honor = honor
+
+    def __enter__(self):
+        api = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def _reply(self, obj):
+                body = json.dumps(obj).encode()
+                self.send_response(200)
+                if api.honor and "dry_run=1" in self.path:
+                    self.send_header("X-Trash-Dry-Run", "1")
+                if api.honor and "fs=" in self.path:
+                    self.send_header("X-Trash-Fs-Filter", "1")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                api.requests.append(("GET", self.path, None, self.headers.get("Authorization")))
+                self._reply({"filesystems": api.filesystems})
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"null")
+                api.requests.append(("POST", self.path, body, self.headers.get("Authorization")))
+                self._reply(api.items if self.path.startswith("/api/trash/claim") else {"recorded": 1})
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_port}"
+        return self
+
+    def __exit__(self, *a):
+        self.srv.shutdown()
+
+    def posts(self, prefix):
+        return [r for r in self.requests if r[0] == "POST" and r[1].startswith(prefix)]
 
 
 class Fs(unittest.TestCase):
@@ -132,30 +183,15 @@ class State(unittest.TestCase):
 
 class Claim(unittest.TestCase):
     def test_posts_with_bearer_token_and_parses_items(self):
-        seen = {}
-
-        class H(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                seen["path"] = self.path
-                seen["auth"] = self.headers.get("Authorization")
-                body = json.dumps([{"path": "/red/nas1/a"}]).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *a):
-                pass
-
-        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        try:
-            items = tm.claim(f"http://127.0.0.1:{srv.server_port}/", "tok", allow_http=True)
-        finally:
-            srv.shutdown()
+        with FakeApi(items=[{"path": "/red/nas1/a"}]) as api:
+            items = tm.claim(api.url, "tok", allow_http=True)
         self.assertEqual(items, [{"path": "/red/nas1/a"}])
-        self.assertEqual(seen, {"path": "/api/trash/claim", "auth": "Bearer tok"})
+        self.assertEqual([(r[1], r[3]) for r in api.requests], [("/api/trash/claim", "Bearer tok")])
+
+    def test_claims_only_the_given_filesystems(self):
+        with FakeApi() as api:
+            tm.claim(api.url, "tok", allow_http=True, filesystems=["/red/nas1", "/red/nas2"])
+        self.assertEqual(api.requests[0][1], "/api/trash/claim?fs=%2Fred%2Fnas1%2C%2Fred%2Fnas2")
 
 
 class Hardening(Fs):
@@ -188,7 +224,7 @@ class Hardening(Fs):
             os.symlink(self.fs, os.path.join(self.fs, "alice/x"))
             return real_open_trash(*a)
 
-        with mock.patch.object(tm, "open_trash", swap_then_open):
+        with mock.patch.object(tm.fsops, "open_trash", swap_then_open):
             dest = tm.move_item(item, TODAY, check_mount=False)
         self.assertTrue(os.path.isfile(os.path.join(self.fs, "projects/bob/data")))
         self.assertFalse(os.path.exists(os.path.join(self.fs, "alice/x.real/projects")))
@@ -256,34 +292,184 @@ class EndToEnd(Fs):
             self.assertFalse(os.path.exists(os.path.join(self.fs, ".trash/2026-01-01")))
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+def run_main(api, *args, env=None):
+    """main() against `api` with a temp HOME and TRASH_TOKEN=tok."""
+    with tempfile.TemporaryDirectory() as home, \
+            mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok", "HOME": home, **(env or {})}):
+        rc = tm.main(["--api", api.url, *args])
+        state = os.path.join(home, ".dutopia-trash")
+        saved = sorted(os.listdir(state)) if os.path.isdir(state) else []
+    return rc, saved
 
 
 class Main(unittest.TestCase):
     def test_dev_mode_needs_only_the_api_and_the_token_env(self):
-        seen = {}
-
-        class H(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                seen["auth"] = self.headers.get("Authorization")
-                self.send_response(200)
-                self.send_header("Content-Length", "2")
-                self.end_headers()
-                self.wfile.write(b"[]")
-
-            def log_message(self, *a):
-                pass
-
-        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        try:
-            with tempfile.TemporaryDirectory() as home, \
-                    mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok", "HOME": home}):
-                rc = tm.main(["--dev", "--api", f"http://127.0.0.1:{srv.server_port}"])
-                saved = os.listdir(os.path.join(home, ".dutopia-trash"))
-        finally:
-            srv.shutdown()
+        with FakeApi(filesystems=["/red/nas1"]) as api:
+            rc, saved = run_main(api, "--dev")
         self.assertEqual(rc, 0)
-        self.assertEqual(seen["auth"], "Bearer tok")
-        self.assertEqual(len(saved), 1)
+        self.assertEqual(api.posts("/api/trash/claim")[0][3], "Bearer tok")
+        self.assertEqual(len([n for n in saved if n.endswith(".json")]), 1)
+
+    def test_claims_only_filesystems_mounted_here(self):
+        # Without --dev the mount check applies: these are not mount points.
+        with FakeApi(filesystems=["/red/nas1", "/red/nas2"]) as api, \
+                tempfile.TemporaryDirectory() as state:
+            rc, _ = run_main(api, "--allow-http", "--state-dir", state)
+        self.assertEqual(rc, 0)
+        self.assertEqual(api.posts("/api/trash/claim"), [])  # nothing mounted: claim nothing
+
+    def test_fs_flag_narrows_the_claim(self):
+        with FakeApi(filesystems=["/red/nas1", "/red/nas2"]) as api:
+            run_main(api, "--dev", "--fs", "/red/nas2")
+        self.assertIn("fs=%2Fred%2Fnas2", api.posts("/api/trash/claim")[0][1])
+        self.assertNotIn("nas1", api.posts("/api/trash/claim")[0][1])
+
+
+class DryRun(Fs):
+    def test_dry_run_checks_but_moves_and_purges_nothing(self):
+        old = os.path.join(self.fs, ".trash", "2026-01-01")
+        os.makedirs(old)
+        f = self.mk("p/file")
+        self.mk("p/dir/x")
+        with tempfile.TemporaryDirectory() as state:
+            errors = tm.run(
+                [self.item(f), self.item(self.fs + "/p/dir"), self.item(self.fs + "/p/gone")],
+                today=TODAY, state_dir=state, keep_days=30, purge_fs=[],
+                check_mount=False, dry_run=True,
+            )
+        self.assertEqual(errors, 0)
+        self.assertTrue(os.path.isfile(f))
+        self.assertTrue(os.path.isfile(self.fs + "/p/dir/x"))
+        self.assertTrue(os.path.isdir(old))
+        self.assertEqual(os.listdir(os.path.join(self.fs, ".trash")), ["2026-01-01"])
+
+    def test_purge_dry_run_lists_without_deleting(self):
+        os.makedirs(os.path.join(self.fs, ".trash", "2026-01-01"))
+        listed = tm.purge(self.fs, TODAY, keep_days=30, dry_run=True)
+        self.assertEqual([os.path.basename(p) for p in listed], ["2026-01-01"])
+        self.assertTrue(os.path.isdir(os.path.join(self.fs, ".trash", "2026-01-01")))
+
+    def test_dry_run_claim_asks_the_server_not_to_remove(self):
+        with FakeApi(filesystems=["/red/nas1"]) as api:
+            rc, saved = run_main(api, "--dev", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("dry_run=1", api.posts("/api/trash/claim")[0][1])
+        self.assertEqual(saved, [])  # nothing claimed, nothing to save
+
+
+class StateDir(unittest.TestCase):
+    def test_unusable_state_dir_stops_before_claiming(self):
+        with FakeApi(filesystems=["/red/nas1"]) as api:
+            rc, _ = run_main(api, "--dev", "--state-dir", "/proc/nope/never" if sys.platform != "darwin" else "/System/nope")
+        self.assertEqual(rc, 1)
+        self.assertEqual(api.posts("/api/trash/claim"), [])
+
+
+class Report(Fs):
+    def _main(self, api, *args):
+        with mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok"}):
+            return tm.main(["--api", api.url, "--dev", "--state-dir", self.state, *args])
+
+    def setUp(self):
+        super().setUp()
+        self._st = tempfile.TemporaryDirectory()
+        self.state = self._st.name
+
+    def tearDown(self):
+        self._st.cleanup()
+        super().tearDown()
+
+    def test_results_are_reported_to_the_server(self):
+        f = self.mk("p/file")
+        items = [self.item(f), self.item(self.fs + "/p/gone")]
+        with FakeApi(filesystems=[self.fs], items=items) as api:
+            rc = self._main(api)
+        self.assertEqual(rc, 0)
+        (_, _, body, auth), = api.posts("/api/trash/report")
+        self.assertEqual(auth, "Bearer tok")
+        by_path = {o["path"]: o for o in body}
+        moved = by_path[f]
+        self.assertEqual(moved["status"], "moved")
+        self.assertTrue(moved["dest"].endswith("/p/file"))
+        self.assertEqual(moved["owner"], ME)
+        self.assertEqual(by_path[self.fs + "/p/gone"]["status"], "skipped")
+        self.assertIn("gone", by_path[self.fs + "/p/gone"]["detail"])
+
+    def test_dry_run_reports_nothing(self):
+        items = [self.item(self.mk("p/file")), self.item(self.fs + "/p/gone")]
+        with FakeApi(filesystems=[self.fs], items=items) as api:
+            self._main(api, "--dry-run")
+        self.assertEqual(api.posts("/api/trash/report"), [])
+
+    def test_report_goes_in_chunks_under_the_body_limit(self):
+        items = [self.item(f"{self.fs}/gone/{i}") for i in range(250)]
+        with FakeApi(filesystems=[self.fs], items=items) as api:
+            self.assertEqual(self._main(api), 0)
+        sizes = [len(r[2]) for r in api.posts("/api/trash/report")]
+        self.assertEqual(sizes, [100, 100, 50])
+
+    def test_batch_rerun_reports_too(self):
+        p = self.mk("p/file")
+        batch = os.path.join(self.state, "b.json")
+        with open(batch, "w") as f:
+            json.dump([self.item(p)], f)
+        with FakeApi(filesystems=[self.fs]) as api:
+            self.assertEqual(self._main(api, "--batch", batch), 0)
+        self.assertEqual(api.posts("/api/trash/claim"), [])
+        (_, _, body, _), = api.posts("/api/trash/report")
+        self.assertEqual(body[0]["status"], "moved")
+
+    def test_old_server_ignoring_dry_run_is_caught(self):
+        p = self.mk("p/file")
+        with FakeApi(filesystems=[self.fs], items=[self.item(p)], honor=False) as api:
+            rc = self._main(api, "--dry-run")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isfile(p))  # nothing moved
+        saved = [n for n in os.listdir(self.state) if n.endswith(".json")]
+        self.assertEqual(len(saved), 1, "the items it really claimed are saved for --batch")
+
+    def test_old_server_ignoring_the_fs_filter_still_runs(self):
+        p = self.mk("p/file")
+        with FakeApi(filesystems=[self.fs], items=[self.item(p)], honor=False) as api:
+            self.assertEqual(self._main(api), 0)
+        self.assertFalse(os.path.exists(p))
+
+    def test_unreachable_api_still_purges_known_filesystems(self):
+        old = os.path.join(self.fs, ".trash", "2020-01-01")
+        os.makedirs(old)
+        tm.save_batch(self.state, datetime.date(2020, 1, 1), [self.item(self.fs + "/x")])
+        with mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok"}):
+            rc = tm.main(["--api", "http://127.0.0.1:9", "--dev", "--state-dir", self.state])
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.exists(old))
+
+    def test_fs_flag_matching_no_server_filesystem_is_an_error(self):
+        with FakeApi(filesystems=[self.fs]) as api:
+            rc = self._main(api, "--fs", "/typo")
+        self.assertEqual(rc, 1)
+        self.assertEqual(api.posts("/api/trash/claim"), [])
+
+    def test_a_second_run_waits_for_nobody_and_claims_nothing(self):
+        import fcntl
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, ".lock"), "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with FakeApi(filesystems=[self.fs]) as api:
+                rc = self._main(api)
+        self.assertEqual(rc, 1)
+        self.assertEqual(api.posts("/api/trash/claim"), [])
+
+    def test_corrupt_saved_batch_still_processes_and_reports(self):
+        with open(os.path.join(self.state, f"{datetime.date.today().isoformat()}.json"), "w") as f:
+            f.write("{not json")
+        p = self.mk("p/file")
+        with FakeApi(filesystems=[self.fs], items=[self.item(p)]) as api:
+            rc = self._main(api)
+        self.assertEqual(rc, 1)  # the save failed: flagged for the cron mail
+        self.assertFalse(os.path.exists(p))  # but the claimed item was moved
+        self.assertEqual(len(api.posts("/api/trash/report")), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
