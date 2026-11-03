@@ -140,8 +140,8 @@
         <div>
           <div class="text-lg font-semibold text-gray-100">Trash</div>
           <div class="text-xs text-gray-400">
-            Items move to the filesystem's .trash 24h after they are queued and
-            are purged after 30 days. Keep undoes it until then.
+            Items move to the filesystem's .trash {api.trashUndoHours}h after they
+            are queued and are purged after 30 days. Keep undoes it until then.
           </div>
         </div>
         <button
@@ -186,7 +186,7 @@
                 {#if item.actor && item.actor !== item.owner}
                   &nbsp;(queued by {item.actor})
                 {/if}
-                &nbsp;•&nbsp; trash after {fmtDate(trashAfter(item.queued_at))}
+                &nbsp;•&nbsp; trash after {fmtDate(trashAfter(item.queued_at, api.trashUndoHours))}
                 {#if item.status === "error" && item.error}
                   &nbsp;•&nbsp; <span class="text-red-400" title={item.error}>{item.error}</span>
                 {/if}

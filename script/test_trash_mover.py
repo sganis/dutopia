@@ -258,3 +258,32 @@ class EndToEnd(Fs):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Main(unittest.TestCase):
+    def test_dev_mode_needs_only_the_api_and_the_token_env(self):
+        seen = {}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen["auth"] = self.headers.get("Authorization")
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"[]")
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as home, \
+                    mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok", "HOME": home}):
+                rc = tm.main(["--dev", "--api", f"http://127.0.0.1:{srv.server_port}"])
+                saved = os.listdir(os.path.join(home, ".dutopia-trash"))
+        finally:
+            srv.shutdown()
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["auth"], "Bearer tok")
+        self.assertEqual(len(saved), 1)

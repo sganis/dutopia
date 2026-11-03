@@ -7,8 +7,12 @@ Runs as root from cron on a node that mounts the filesystems:
   0 2 * * * python3 /opt/dutopia/trash_mover.py \\
       --api https://dutopia.apps.ocp.corp.local --token-file /etc/dutopia/trash.token
 
+Local testing (duapi started with TRASH_UNDO_HOURS=0 TRASH_TOKEN=x):
+
+  TRASH_TOKEN=x python3 script/trash_mover.py --dev --api http://localhost:8080
+
 1. POST /api/trash/claim with the token: duapi returns the items queued over
-   24h ago and drops them from its queue. The batch is saved first to
+   24h (TRASH_UNDO_HOURS) ago and drops them from its queue. The batch is saved first to
    <state-dir>/<date>.json (rerun it with --batch if a run dies halfway).
 2. Each item is skipped if it is gone, inside .trash/.stats, reached through
    a symlink, no longer owned by its owner, a folder holding anything of
@@ -409,9 +413,9 @@ def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--api", help="duapi base URL, e.g. https://dutopia.example")
-    ap.add_argument("--token-file", help="file holding TRASH_TOKEN")
+    ap.add_argument("--token-file", help="file holding TRASH_TOKEN (default: the TRASH_TOKEN env var)")
     ap.add_argument("--cafile", help="CA bundle for a private-CA duapi certificate")
-    ap.add_argument("--state-dir", default=STATE_DIR, help=f"saved batches (default {STATE_DIR})")
+    ap.add_argument("--state-dir", help=f"saved batches (default {STATE_DIR}; ~/.dutopia-trash with --dev)")
     ap.add_argument("--keep-days", type=int, default=KEEP_DAYS, help="purge trash older than this")
     ap.add_argument("--purge", action="append", default=[], metavar="FS",
                     help="also purge FS/.trash (repeatable)")
@@ -424,17 +428,29 @@ def main(argv=None):
                     help="accept a plain-http --api (testing only)")
     ap.add_argument("--no-mount-check", action="store_true",
                     help="accept filesystems that are not mount points (testing only)")
+    ap.add_argument("--dev", action="store_true",
+                    help="local testing: --allow-http --no-mount-check --min-uid 0, "
+                         "batches in ~/.dutopia-trash")
     args = ap.parse_args(argv)
+    if args.dev:
+        args.allow_http = args.no_mount_check = True
+        args.min_uid = 0
+    if not args.state_dir:
+        args.state_dir = os.path.expanduser("~/.dutopia-trash") if args.dev else STATE_DIR
     today = datetime.date.today()
 
     if args.batch:
         with open(args.batch) as f:
             items = json.load(f)
     else:
-        if not args.api or not args.token_file:
-            ap.error("--api and --token-file are required unless --batch is given")
-        with open(args.token_file) as f:
-            token = f.read().strip()
+        if args.token_file:
+            with open(args.token_file) as f:
+                token = f.read().strip()
+        else:
+            token = os.environ.get("TRASH_TOKEN", "").strip()
+        if not args.api or not token:
+            ap.error("--api and a token (--token-file or TRASH_TOKEN) are required "
+                     "unless --batch is given")
         items = claim(args.api, token, args.cafile, allow_http=args.allow_http)
         log("claim", f"{len(items)} item(s)")
         try:

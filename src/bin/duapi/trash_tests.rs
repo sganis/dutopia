@@ -118,7 +118,7 @@ fn split_due_uses_the_24h_rule() {
     let now = 1_000_000;
     let old = entry("/red/nas1/old", "a", now - CLAIM_AFTER_SECS);
     let fresh = entry("/red/nas1/fresh", "a", now - CLAIM_AFTER_SECS + 1);
-    let (due, kept) = split_due(vec![old.clone(), fresh.clone()], now);
+    let (due, kept) = split_due(vec![old.clone(), fresh.clone()], now, CLAIM_AFTER_SECS);
     assert_eq!(due, vec![old]);
     assert_eq!(kept, vec![fresh]);
 }
@@ -331,4 +331,20 @@ async fn add_refuses_unknown_owner() {
     let _dir = setup();
     let root = claims("root", true, &[]);
     assert_eq!(add(&root, "/red/nas1/old", "UNK").await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial]
+async fn undo_hours_env_shortens_the_wait() {
+    let dir = setup();
+    let now = chrono::Utc::now().timestamp();
+    let fresh = entry("/red/nas1/fresh", "alice", now - 60);
+    save(dir.path(), &[fresh.clone()]).unwrap();
+    unsafe { std::env::set_var("TRASH_UNDO_HOURS", "0") };
+    assert_eq!(undo_hours(), 0);
+    let (status, got) = claim(Some("Bearer s3cret")).await;
+    unsafe { std::env::remove_var("TRASH_UNDO_HOURS") };
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, vec![fresh]);
+    assert_eq!(undo_hours(), 24);
 }

@@ -32,6 +32,8 @@ class Api {
   /** Mirrors /api/health.filesystems (the server's FILESYSTEMS). Reactive:
    *  the trash icon and "up" from a filesystem depend on it. */
   public filesystems: string[] = $state([]);
+  /** Mirrors /api/health.trash_undo_hours: how long Keep can undo a trash. */
+  public trashUndoHours: number = $state(24);
 
   private async request<T>(
     endpoint: string = "",
@@ -123,6 +125,7 @@ class Api {
       const data = await resp.json();
       this.smtpConfigured = !!data?.smtp_configured;
       this.filesystems = Array.isArray(data?.filesystems) ? data.filesystems : [];
+      if (typeof data?.trash_undo_hours === 'number') this.trashUndoHours = data.trash_undo_hours;
       await initDbVersion(typeof data?.db_version === 'string' ? data.db_version : null);
     } catch {
       /* network hiccup — leave smtpConfigured and the version at previous values */

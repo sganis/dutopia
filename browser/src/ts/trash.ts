@@ -45,7 +45,8 @@ export function canTrash(viewer: TrashViewer, path: string, owner: string | null
     || owner === viewer.username;
 }
 
-/** When the cron may move an item queued at `queuedAt` (unix seconds), as ms. */
-export function trashAfter(queuedAt: number): number {
-  return (queuedAt + UNDO_HOURS * 3600) * 1000;
+/** When the cron may move an item queued at `queuedAt` (unix seconds), as
+ *  ms. `hours` is the server's undo window (/api/health.trash_undo_hours). */
+export function trashAfter(queuedAt: number, hours: number = UNDO_HOURS): number {
+  return (queuedAt + hours * 3600) * 1000;
 }

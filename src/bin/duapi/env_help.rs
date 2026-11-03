@@ -65,6 +65,9 @@ Filesystems and trash:
                           trashed (into <fs>/.trash by the nightly cron).
   TRASH_DIR               Folder of the trash queue, queue.json
                           (default: /data/trash)
+  TRASH_UNDO_HOURS        Hours an item waits in the queue before the cron
+                          may take it, i.e. the Keep window (default: 24;
+                          0 for local testing)
   TRASH_TOKEN             Bearer token the trash cron sends to
                           POST /api/trash/claim. Claim is refused when unset.
 

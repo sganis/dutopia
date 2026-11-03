@@ -57,4 +57,9 @@ describe('trashAfter', () => {
   it('is 24h after queued_at, in ms', () => {
     expect(trashAfter(1_000)).toBe((1_000 + 86_400) * 1000);
   });
+
+  it('uses the server undo window when given', () => {
+    expect(trashAfter(1_000, 0)).toBe(1_000_000);
+    expect(trashAfter(1_000, 1)).toBe((1_000 + 3_600) * 1000);
+  });
 });

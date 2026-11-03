@@ -32,8 +32,19 @@ use dutopia::filesystems::fs_of;
 use crate::cleanup::{validate, PathItem};
 use crate::query::normalize_path;
 
-/// Entries must sit in the queue this long before the cron may claim them.
-pub const CLAIM_AFTER_SECS: i64 = 24 * 60 * 60;
+/// Default undo window: entries wait this long before the cron may claim them.
+pub const DEFAULT_UNDO_HOURS: i64 = 24;
+pub const CLAIM_AFTER_SECS: i64 = DEFAULT_UNDO_HOURS * 60 * 60;
+
+/// The undo window in hours: `TRASH_UNDO_HOURS` (0 claims at once, for local
+/// testing), default 24. Read on every call so tests can vary it.
+pub fn undo_hours() -> i64 {
+    std::env::var("TRASH_UNDO_HOURS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|h| *h >= 0)
+        .unwrap_or(DEFAULT_UNDO_HOURS)
+}
 /// Bound on queue.json so a runaway client cannot grow it without limit.
 const MAX_ENTRIES: usize = 20_000;
 const QUEUE_FILE: &str = "queue.json";
@@ -140,11 +151,11 @@ async fn check_db_owner(path: &str, owner: &str, actor: &str) -> Result<(), Resp
 }
 
 /// Split `entries` into (claimed, kept): claimed are those queued at least
-/// `CLAIM_AFTER_SECS` before `now`.
-pub fn split_due(entries: Vec<Entry>, now: i64) -> (Vec<Entry>, Vec<Entry>) {
+/// `after_secs` before `now`.
+pub fn split_due(entries: Vec<Entry>, now: i64, after_secs: i64) -> (Vec<Entry>, Vec<Entry>) {
     entries
         .into_iter()
-        .partition(|e| now - e.queued_at >= CLAIM_AFTER_SECS)
+        .partition(|e| now - e.queued_at >= after_secs)
 }
 
 /// Load the queue (missing file = empty).
@@ -359,7 +370,7 @@ fn same_token(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// POST /api/trash/claim — `Authorization: Bearer $TRASH_TOKEN` (not a user
-/// JWT). Returns the entries queued over 24h ago and removes them from the
+/// JWT). Returns the entries queued over `undo_hours()` ago and removes them from the
 /// queue: from here on they belong to the cron. 401 when TRASH_TOKEN is
 /// unset or does not match.
 pub async fn claim_handler(headers: HeaderMap) -> Response {
@@ -384,8 +395,9 @@ pub async fn claim_handler(headers: HeaderMap) -> Response {
         }
     }
     let now = Utc::now().timestamp();
+    let after_secs = undo_hours() * 60 * 60;
     let res = with_queue(move |q| {
-        let (due, kept) = split_due(std::mem::take(q), now);
+        let (due, kept) = split_due(std::mem::take(q), now, after_secs);
         *q = kept;
         let changed = !due.is_empty();
         (due, changed)

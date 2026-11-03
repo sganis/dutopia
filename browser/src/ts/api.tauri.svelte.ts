@@ -116,6 +116,7 @@ class Api {
   async probeHealth(): Promise<void> { /* noop on desktop */ }
   /** No FILESYSTEMS on desktop: no server-side trash. */
   public filesystems: string[] = [];
+  public trashUndoHours: number = 24;
   async trashList(): Promise<TrashEntry[]> { throw new Error(WEB_ONLY); }
   async trashAdd(_path: string, _size: number, _owner: string): Promise<TrashEntry> {
     throw new Error(WEB_ONLY);
