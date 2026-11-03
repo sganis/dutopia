@@ -1,7 +1,7 @@
 {
 	"name": "browser",
 	"private": true,
-	"version": "4.0.35",
+	"version": "4.0.36",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
