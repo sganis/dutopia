@@ -11,6 +11,11 @@ data:
   GLOBAL_ADMINS: "dutopia-admins"
   # Scoped admins: full admin inside their roots, self-only elsewhere.
   # STORAGE_ADMINS: "user1:/red/nas1,/red/nas2;user2:/red/ssd"
+  # Mount points duscan scans (each has <fs>/.stats). The home page lists
+  # them, and only paths inside them can be trashed (into <fs>/.trash).
+  FILESYSTEMS: "/red/nas1,/red/nas2"
+  # Trash queue (queue.json) on the PVC; this is the default.
+  # TRASH_DIR: "/data/trash"
   REQUEST_TIMEOUT_SECS: "30"
   MAX_BODY_BYTES: "65536"
   MAX_PAGE_SIZE: "2000"

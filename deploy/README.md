@@ -122,6 +122,41 @@ Serving on http://0.0.0.0:8080  (static dir: /app/public)
 ```
 
 `File index: absent` means the DB was built without `--raw`.
+With `FILESYSTEMS` set, the log also shows `FILESYSTEMS=...` and
+`Trash queue: /data/trash/queue.json (claim enabled)`.
+
+## 9. Trash cron
+
+Without `FILESYSTEMS` the web UI shows no trash icon, so the trash cart (and
+its Cleanup script / Notify buttons) is not available. With it, the trash
+icon queues items in `/data/trash/queue.json` (on the PVC). Keep in
+the UI undoes it for 24h. After that, a cron on a node that mounts the
+filesystems moves them to `<fs>/.trash/<date>/…`, packs folders into
+`.tar.zst`, and deletes trash older than 30 days. Users cannot restore after
+the 24h window; admins can, from `<fs>/.trash` until the purge.
+
+On that node, as root (Python 3, GNU tar and zstd):
+
+```bash
+install -D -m 0755 script/trash_mover.py /opt/dutopia/trash_mover.py
+install -D -m 0600 trash.token /etc/dutopia/trash.token   # same value as the Secret
+crontab -e
+0 2 * * * python3 /opt/dutopia/trash_mover.py --api https://dutopia.apps.ocp.corp.local --token-file /etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2
+```
+
+`--fs` (one per FILESYSTEMS entry) limits what root may touch to those
+filesystems even if the API were compromised; keep it. The script refuses a
+plain-http `--api`, owners below uid 1000 (`--min-uid`), folders that hold
+another owner's files or another mount, paths reached through a symlink, and
+a `<fs>/.trash` that is a symlink or not root's. The node must mount the
+filesystems with root access (no `root_squash`), or the renames fail.
+
+Each run saves what it claimed to `/var/lib/dutopia-trash/<date>.json`; if a
+run dies halfway, rerun that batch with `--batch /var/lib/dutopia-trash/<date>.json`.
+Items that are gone, no longer owned by their owner, or on a filesystem not
+mounted on the node are skipped (logged as `[skip]`). Add `--cafile` when the
+Route uses a private CA. Test it by hand first: `python3 /opt/dutopia/trash_mover.py
+--api ... --token-file ...` claims only items queued over 24h ago.
 
 ---
 
@@ -138,6 +173,8 @@ Serving on http://0.0.0.0:8080  (static dir: /app/public)
 - **TLS** terminates at the Route. Leave `TLS_CERT`/`TLS_KEY` unset; setting
   only one is fatal.
 - **Port 8080** is the default and is above 1024 — no SCC change needed.
+- **Trash claim 401** — `TRASH_TOKEN` is unset in the pod or differs from
+  `/etc/dutopia/trash.token` on the cron node.
 - **`CORS_ORIGIN`** stays unset while `duapi` serves the SPA itself.
 - **Memory** — `db.rs` opens `max(num_cpus, 4)` connections at 64 MiB cache
   each. Raise the 1Gi limit together with the CPU limit.

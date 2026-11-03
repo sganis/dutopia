@@ -37,6 +37,7 @@
     onReveal,
     onTerminal,
     onDelete,
+    canDelete,
     onUserHover,
     onUserMove,
     onUserLeave,
@@ -53,6 +54,9 @@
      *  folder has exactly one owner (web build requires single-owner folders
      *  for cleanup requests). Desktop passes whatever owner — it ignores it. */
     onDelete?: (path: string, size: number, owner: string) => void;
+    /** Extra gate on the trash icon (web: the trash tiers + FILESYSTEMS).
+     *  Unset = shown for every single-owner folder. */
+    canDelete?: (path: string, owner: string) => boolean;
     onUserHover?: (e: MouseEvent, userData: UserStatsJson, percent: number) => void;
     onUserMove?: (e: MouseEvent) => void;
     onUserLeave?: () => void;
@@ -157,7 +161,7 @@
         onCopy={onCopyPath ? () => onCopyPath(folder.path) : undefined}
         onReveal={onReveal ? () => onReveal(folder.path) : undefined}
         onTerminal={onTerminal ? () => onTerminal(folder.path) : undefined}
-        onDelete={onDelete && singleOwner
+        onDelete={onDelete && singleOwner && (canDelete?.(folder.path, singleOwner) ?? true)
           ? () => onDelete(folder.path, toNum(folder.total_disk), singleOwner!)
           : undefined}
       />

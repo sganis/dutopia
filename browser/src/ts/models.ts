@@ -60,3 +60,14 @@ export type FilesResult = {
 
 export type SortKey = "disk" | "size" | "count";
 export type AgeFilterType = -1 | 0 | 1 | 2;
+
+/** One queued item of the server-side trash (src/bin/duapi/trash.rs). */
+export type TrashEntry = {
+  path: string;
+  size: number;
+  owner: string;
+  actor: string;
+  fs: string;
+  /** Unix seconds. */
+  queued_at: number;
+};

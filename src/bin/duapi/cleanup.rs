@@ -162,7 +162,7 @@ pub async fn notify_handler(
     }
 }
 
-fn validate(username: &str, paths: &[PathItem]) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate(username: &str, paths: &[PathItem]) -> Result<(), (StatusCode, String)> {
     if username.trim().is_empty() || username.len() > 256 {
         return Err((StatusCode::BAD_REQUEST, "invalid username".to_string()));
     }

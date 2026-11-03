@@ -1,89 +1,53 @@
 // browser/src/ts/cleanupQueue.svelte.ts
 //
-// Browser-build queue for "request cleanup" actions.
+// Browser-build trash cart, kept on the server (GET/POST/DELETE /api/trash)
+// so the nightly cron can see it: an item queued here is moved to
+// `<fs>/.trash` once it has waited 24h. Keep (removeFromCleanupQueue) is the
+// undo for that day. The script/notify actions stay as extra ways to ask
+// the owner to clean up; they no longer empty the cart.
 //
-// Mirrors deleteQueue.svelte.ts in shape but ends with non-destructive
-// actions — the server cannot delete on behalf of arbitrary users in a
-// read-only cluster deployment. Each queued item carries its owner so the
-// panel can filter by user (same UX pattern as the main app's user
-// dropdown) and the script/notify endpoints know which user to target.
+// Each item carries its owner so the panel can filter by user (same UX
+// pattern as the main app's user dropdown) and the script/notify endpoints
+// know which user to target.
 
 import { api } from "$api";
+import type { TrashEntry } from "./models";
 
 export type CleanupStatus = "queued" | "requesting" | "requested" | "error";
 
-export type CleanupItem = {
-  path: string;
-  /** Disk bytes the item occupies. Summed for header totals. */
-  size: number;
-  /** Owning username — required. Folders with mixed ownership are blocked
-   *  at the row-action level so we never queue one without a single owner. */
-  owner: string;
+export type CleanupItem = TrashEntry & {
   status: CleanupStatus;
   error?: string;
 };
 
-const STORAGE_KEY = "cleanupQueue.v1";
-
-function loadFromStorage(): CleanupItem[] {
-  if (typeof localStorage === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((i) => typeof i?.path === "string" && typeof i?.owner === "string")
-      .map((i) => ({
-        path: i.path,
-        size: Number(i.size) || 0,
-        owner: i.owner,
-        // An in-flight request that was interrupted by a page reload didn't
-        // actually complete — drop back to queued so the user can retry.
-        status: (i.status === "error" ? "error" : "queued") as CleanupStatus,
-        error: i.error,
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function saveToStorage() {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cleanupQueue.items));
-  } catch {
-    /* quota / private mode — non-fatal */
-  }
-}
-
 export const cleanupQueue = $state({
-  items: loadFromStorage(),
+  items: [] as CleanupItem[],
   panelOpen: false,
 });
 
-function indexOf(path: string): number {
-  return cleanupQueue.items.findIndex((i) => i.path === path);
+function toItem(e: TrashEntry): CleanupItem {
+  return { ...e, status: "queued" };
 }
 
-export function addToCleanupQueue(path: string, size: number, owner: string) {
+/** Replace the cart with the server's view of it. */
+export async function loadCleanupQueue(): Promise<void> {
+  const entries = await api.trashList();
+  cleanupQueue.items = entries.map(toItem);
+}
+
+/** Queue an item on the server. Throws (cart unchanged) when refused. */
+export async function addToCleanupQueue(path: string, size: number, owner: string): Promise<void> {
   if (!owner) return;
-  if (indexOf(path) >= 0) return;
-  cleanupQueue.items.push({ path, size, owner, status: "queued" });
-  saveToStorage();
+  const e = await api.trashAdd(path, size, owner);
+  if (!cleanupQueue.items.some((i) => i.path === e.path)) {
+    cleanupQueue.items.push(toItem(e));
+  }
 }
 
-/** Per-row "Keep" — remove from queue without requesting cleanup. */
-export function removeFromCleanupQueue(path: string) {
+/** Per-row "Keep": take the item out of the server queue (the undo). */
+export async function removeFromCleanupQueue(path: string): Promise<void> {
+  await api.trashKeep(path);
   cleanupQueue.items = cleanupQueue.items.filter((i) => i.path !== path);
-  saveToStorage();
-}
-
-/** Clear every item owned by a given user (used after a successful
- *  script download or email-notify). */
-export function clearUser(owner: string) {
-  cleanupQueue.items = cleanupQueue.items.filter((i) => i.owner !== owner);
-  saveToStorage();
 }
 
 /** Distinct owners currently in the queue, sorted alphabetically for the
@@ -108,7 +72,7 @@ export function totalsFor(owner: string | null): { count: number; size: number }
 }
 
 /** Download the server-generated Python script for a user's items. Marks
- *  the group as "requested" on success and removes them from the queue. */
+ *  the group as "requested" on success; the items stay queued. */
 export async function downloadScript(owner: string): Promise<void> {
   const items = filteredItems(owner);
   if (items.length === 0) return;
@@ -119,7 +83,7 @@ export async function downloadScript(owner: string): Promise<void> {
       items.map((i) => ({ path: i.path, size: i.size })),
     );
     saveBlob(blob, `cleanup-${safeFilename(owner)}-${yyyymmdd()}.py`);
-    clearUser(owner);
+    markGroup(owner, "requested");
   } catch (err: any) {
     markGroup(owner, "error", err?.message ?? String(err));
     throw err;
@@ -127,7 +91,7 @@ export async function downloadScript(owner: string): Promise<void> {
 }
 
 /** Request the backend to email the owner. Admin only (enforced by the
- *  server). Clears the group on success. */
+ *  server). Marks the group as "requested"; the items stay queued. */
 export async function notifyUser(owner: string, message?: string): Promise<string> {
   const items = filteredItems(owner);
   if (items.length === 0) return "";
@@ -138,7 +102,7 @@ export async function notifyUser(owner: string, message?: string): Promise<strin
       items.map((i) => ({ path: i.path, size: i.size })),
       message,
     );
-    clearUser(owner);
+    markGroup(owner, "requested");
     return resp?.to ?? "";
   } catch (err: any) {
     markGroup(owner, "error", err?.message ?? String(err));
@@ -153,7 +117,6 @@ function markGroup(owner: string, status: CleanupStatus, error?: string) {
       i.error = error;
     }
   }
-  saveToStorage();
 }
 
 function saveBlob(blob: Blob, filename: string) {

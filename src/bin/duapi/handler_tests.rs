@@ -10,7 +10,7 @@ use dutopia::item::FilesOut;
 
 const TEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
-fn init_db_once() {
+pub(crate) fn init_db_once() {
     if DB_POOL.get().is_some() {
         return;
     }
@@ -472,4 +472,73 @@ async fn test_users_handler_storage_admin_gets_full_list() {
     let list: Vec<String> = serde_json::from_slice(&body).unwrap();
     assert!(list.contains(&"alice".to_string()));
     assert!(list.contains(&"bob".to_string()));
+}
+
+async fn home_paths(claims: Claims, users: Option<&str>) -> (StatusCode, Vec<FolderOut>) {
+    let q = FolderQuery { path: Some("".into()), users: users.map(Into::into), age: None };
+    let resp = get_folders_handler(claims, Query(q)).await.into_response();
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or_default())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_home_lists_filesystems_when_set() {
+    init_db_once();
+    let admin = Claims { sub: "root".into(), is_admin: true, roots: vec![], exp: 9_999_999_999 };
+    let alice = Claims { sub: "alice".into(), is_admin: false, roots: vec![], exp: 9_999_999_999 };
+
+    // Without FILESYSTEMS the home page is the path tree: `/`.
+    unsafe { std::env::remove_var("FILESYSTEMS") };
+    let (_, rows) = home_paths(admin.clone(), None).await;
+    assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), vec!["/"]);
+
+    unsafe { std::env::set_var("FILESYSTEMS", "/docs,/missing") };
+    let (status, rows) = home_paths(admin, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), vec!["/docs"]);
+
+    // Regular user: own usage on each filesystem; all users is forbidden.
+    let (status, rows) = home_paths(alice.clone(), Some("alice")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].users.keys().all(|u| u == "alice"));
+    let (status, _) = home_paths(alice, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    unsafe { std::env::remove_var("FILESYSTEMS") };
+}
+
+#[tokio::test]
+#[serial]
+async fn test_home_storage_admin_sees_filesystems_of_their_roots() {
+    init_db_once();
+    unsafe { std::env::set_var("FILESYSTEMS", "/,/docs") };
+    // Root /docs is a filesystem; `/` holds it too (longest-prefix aside,
+    // both rows contain the root).
+    let sa = Claims { sub: "user1".into(), is_admin: false, roots: vec!["/docs".into()], exp: 9_999_999_999 };
+    let (status, rows) = home_paths(sa, Some("bob")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), vec!["/", "/docs"]);
+    // Users filter dropped (navigable): bob's and alice's usage both show.
+    assert!(rows[0].users.contains_key("alice"));
+
+    let other = Claims { sub: "user2".into(), is_admin: false, roots: vec!["/opt".into()], exp: 9_999_999_999 };
+    unsafe { std::env::set_var("FILESYSTEMS", "/docs") };
+    let (status, rows) = home_paths(other, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(rows.is_empty());
+    unsafe { std::env::remove_var("FILESYSTEMS") };
+}
+
+#[tokio::test]
+#[serial]
+async fn test_health_reports_filesystems() {
+    init_db_once();
+    unsafe { std::env::set_var("FILESYSTEMS", "/red/nas1/,/red/nas2") };
+    let resp = health_handler().await.into_response();
+    let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["filesystems"], serde_json::json!(["/red/nas1", "/red/nas2"]));
+    unsafe { std::env::remove_var("FILESYSTEMS") };
 }

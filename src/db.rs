@@ -159,21 +159,63 @@ pub fn list_children(
     user_filter: &[String],
     age_filter: Option<u8>,
 ) -> Result<Vec<FolderOut>> {
-    let conn = pool.get().context("acquiring connection")?;
-
-    let mut sql = String::from(
-        "SELECT p.full_path, u.name, s.age,
-                s.file_count, s.file_size, s.disk_bytes, s.linked_size,
-                s.atime, s.mtime
-         FROM   paths parent
+    let from = "FROM   paths parent
          JOIN   paths p ON p.parent_id = parent.id
          JOIN   stats s ON s.path_id   = p.id
          JOIN   users u ON u.id        = s.user_id
-         WHERE  parent.full_path = ?1",
-    );
+         WHERE  parent.full_path = ?1";
+    let params: Vec<Box<dyn ToSql>> = vec![Box::new(dir_path.to_string())];
+    query_folders(pool, from, params, user_filter, age_filter)
+}
 
-    // Boxed params so we can grow the list dynamically.
-    let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(dir_path.to_string())];
+/// The stats rows of `paths` themselves (not their children), same row shape
+/// and filters as `list_children`. Backs the home page when `FILESYSTEMS`
+/// lists the mount points. Paths with no matching rows are absent.
+pub fn folder_stats(
+    pool: &DbPool,
+    paths: &[String],
+    user_filter: &[String],
+    age_filter: Option<u8>,
+) -> Result<Vec<FolderOut>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut from = String::from(
+        "FROM   paths p
+         JOIN   stats s ON s.path_id = p.id
+         JOIN   users u ON u.id      = s.user_id
+         WHERE  p.full_path IN (",
+    );
+    let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(paths.len());
+    for (i, p) in paths.iter().enumerate() {
+        if i > 0 {
+            from.push(',');
+        }
+        from.push_str(&format!("?{}", i + 1));
+        params.push(Box::new(p.clone()));
+    }
+    from.push(')');
+    query_folders(pool, &from, params, user_filter, age_filter)
+}
+
+/// Run `SELECT <folder row columns> <from>` plus the user/age filters and
+/// group the rows per path. `from` holds the FROM/JOIN/WHERE clauses; its
+/// placeholders are `params` (?1..?N) and the filters are appended after.
+fn query_folders(
+    pool: &DbPool,
+    from: &str,
+    mut params: Vec<Box<dyn ToSql>>,
+    user_filter: &[String],
+    age_filter: Option<u8>,
+) -> Result<Vec<FolderOut>> {
+    let conn = pool.get().context("acquiring connection")?;
+
+    let mut sql = format!(
+        "SELECT p.full_path, u.name, s.age,
+                s.file_count, s.file_size, s.disk_bytes, s.linked_size,
+                s.atime, s.mtime
+         {from}"
+    );
 
     if let Some(a) = age_filter {
         sql.push_str(&format!(" AND s.age = ?{}", params.len() + 1));

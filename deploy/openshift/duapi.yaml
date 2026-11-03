@@ -20,6 +20,9 @@ metadata:
   labels: { app: duapi }
 spec:
   replicas: 1
+  # One pod at a time: the trash queue (/data/trash/queue.json) has a
+  # single writer, and the RWO PVC cannot be shared across nodes anyway.
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: duapi }
   template:

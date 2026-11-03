@@ -2,7 +2,7 @@
 import { State, API_URL } from "./store.svelte";
 import { fetchCached, initDbVersion } from './cache.js';
 import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile } from "./models";
+import type { FilesResult, ScannedFile, TrashEntry } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
 export type RawFolder = { path: string; users: Record<string, Record<'0'|'1'|'2', AgeMini>> };
@@ -29,6 +29,9 @@ class Api {
   /** Mirrors /api/health.smtp_configured. Used to gate the Notify button in
    *  the cleanup panel. Populated lazily by probeHealth(). */
   public smtpConfigured: boolean = false;
+  /** Mirrors /api/health.filesystems (the server's FILESYSTEMS). Reactive:
+   *  the trash icon and "up" from a filesystem depend on it. */
+  public filesystems: string[] = $state([]);
 
   private async request<T>(
     endpoint: string = "",
@@ -119,6 +122,7 @@ class Api {
       if (!resp.ok) return;
       const data = await resp.json();
       this.smtpConfigured = !!data?.smtp_configured;
+      this.filesystems = Array.isArray(data?.filesystems) ? data.filesystems : [];
       await initDbVersion(typeof data?.db_version === 'string' ? data.db_version : null);
     } catch {
       /* network hiccup — leave smtpConfigured and the version at previous values */
@@ -165,6 +169,41 @@ class Api {
       throw new Error(msg || `cleanup/notify failed (${resp.status})`);
     }
     return resp.json();
+  }
+
+  /** Server-side trash cart. Plain fetches, never the IndexedDB cache (a
+   *  cached cart would be stale), and a 403 here means "not yours", not a
+   *  dead session, so it must not log the user out like request() does. */
+  private async trashFetch<T>(endpoint: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<T> {
+    const resp = await fetch(`${this.baseUrl}${endpoint}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${State.token}`,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (resp.status === 401) State.logout();
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(msg || `${method} ${endpoint} failed (${resp.status})`);
+    }
+    return resp.json();
+  }
+
+  /** GET /api/trash: the queued items this user may manage. */
+  async trashList(): Promise<TrashEntry[]> {
+    return this.trashFetch<TrashEntry[]>("trash", "GET");
+  }
+
+  /** POST /api/trash: queue an item; returns the stored entry. */
+  async trashAdd(path: string, size: number, owner: string): Promise<TrashEntry> {
+    return this.trashFetch<TrashEntry>("trash", "POST", { path, size, owner });
+  }
+
+  /** DELETE /api/trash?path= — Keep (the 1-day undo). */
+  async trashKeep(path: string): Promise<TrashEntry> {
+    return this.trashFetch<TrashEntry>(`trash?path=${encodeURIComponent(path)}`, "DELETE");
   }
 
   // Desktop-only methods. Stubs in the web build — only callable from

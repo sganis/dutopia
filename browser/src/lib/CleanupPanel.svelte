@@ -1,12 +1,15 @@
 <!-- browser/src/lib/CleanupPanel.svelte -->
 <!--
-  Cleanup-request panel (web build only).
+  Trash panel (web build only): the server-side trash cart.
 
   Layout mirrors DeletePanel: a centered modal with a scrollable list of
   items. What's different:
-    - No direct-delete button; the server cannot delete in a cluster
-      deployment. Instead, per-user "Download script" and (admin-only)
-      "Notify user" actions.
+    - No direct-delete button; duapi cannot delete in a cluster deployment.
+      Every item is moved to `<fs>/.trash` by the nightly cron once it has
+      waited 24h; each row shows when, and Keep (the undo) takes it out of
+      the server queue before then.
+    - Per-user "Download script" and (admin-only) "Notify user" actions
+      remain as extra nudges; they no longer empty the cart.
     - User filter dropdown at the top. Admins see "All users" plus every
       owner currently in the queue. Non-admins only have their own username
       (the dropdown is disabled since there is nothing to pick).
@@ -21,6 +24,7 @@
   import { State } from "../ts/store.svelte";
   import {
     cleanupQueue,
+    loadCleanupQueue,
     removeFromCleanupQueue,
     distinctOwners,
     filteredItems,
@@ -29,6 +33,7 @@
     notifyUser,
   } from "../ts/cleanupQueue.svelte";
   import { humanBytes } from "../ts/util";
+  import { trashAfter } from "../ts/trash";
 
   let {
     onToast,
@@ -53,8 +58,36 @@
     }
   });
 
+  // Re-read the cart each time the panel opens: the cron may have taken
+  // items, or another admin may have queued or kept some.
+  $effect(() => {
+    if (cleanupQueue.panelOpen) {
+      loadCleanupQueue().catch((err) => onToast?.(err?.message ?? "Could not load the trash"));
+    }
+  });
+
   function close() {
     cleanupQueue.panelOpen = false;
+  }
+
+  async function clickKeep(path: string) {
+    if (working) return;
+    working = true;
+    try {
+      await removeFromCleanupQueue(path);
+      onToast?.("Kept: removed from the trash");
+    } catch (err: any) {
+      onToast?.(err?.message ?? "Keep failed");
+      await loadCleanupQueue().catch(() => {});
+    } finally {
+      working = false;
+    }
+  }
+
+  function fmtDate(ms: number): string {
+    return new Date(ms).toLocaleString(undefined, {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
   }
 
   async function clickDownload() {
@@ -105,9 +138,10 @@
     >
       <div class="flex items-center justify-between mb-3 gap-4">
         <div>
-          <div class="text-lg font-semibold text-gray-100">Cleanup queue</div>
+          <div class="text-lg font-semibold text-gray-100">Trash</div>
           <div class="text-xs text-gray-400">
-            Request cleanup — users run the script themselves on a cluster node.
+            Items move to the filesystem's .trash 24h after they are queued and
+            are purged after 30 days. Keep undoes it until then.
           </div>
         </div>
         <button
@@ -149,6 +183,10 @@
               <div class="text-xs text-gray-400">
                 {humanBytes(item.size || 0)}
                 &nbsp;•&nbsp; <span class="text-gray-300">{item.owner}</span>
+                {#if item.actor && item.actor !== item.owner}
+                  &nbsp;(queued by {item.actor})
+                {/if}
+                &nbsp;•&nbsp; trash after {fmtDate(trashAfter(item.queued_at))}
                 {#if item.status === "error" && item.error}
                   &nbsp;•&nbsp; <span class="text-red-400" title={item.error}>{item.error}</span>
                 {/if}
@@ -165,16 +203,16 @@
 
             <button
               class="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-100 text-xs disabled:opacity-50"
-              onclick={() => removeFromCleanupQueue(item.path)}
+              onclick={() => clickKeep(item.path)}
               disabled={working}
-              title="Remove from queue"
+              title="Take it out of the trash"
             >
               Keep
             </button>
           </div>
         {:else}
           <div class="text-sm text-gray-400 text-center py-8">
-            Queue is empty. Click the delete icon on files or single-owner folders to target them.
+            Trash is empty. Click the delete icon on files or single-owner folders to queue them.
           </div>
         {/each}
       </div>

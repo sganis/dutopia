@@ -23,7 +23,8 @@
   import CleanupPanel from "../lib/CleanupPanel.svelte";
   import { scanStatus } from "../ts/scan.svelte";
   import { deleteQueue, addToQueue } from "../ts/deleteQueue.svelte";
-  import { cleanupQueue, addToCleanupQueue } from "../ts/cleanupQueue.svelte";
+  import { cleanupQueue, addToCleanupQueue, loadCleanupQueue } from "../ts/cleanupQueue.svelte";
+  import { canTrash, inRoot } from "../ts/trash";
 
   //#region types
   type Age = {
@@ -448,8 +449,14 @@
   }
 
   function goUp() {
-    const parent = getParent(fullPath || path);
-    navigateTo(parent);
+    const current = fullPath || path;
+    // With FILESYSTEMS, home lists the filesystems: up from one goes home,
+    // not to its parent folder (e.g. `/red`).
+    if (api.filesystems.some((fs) => inRoot(fs, current) && inRoot(current, fs))) {
+      navigateTo("");
+      return;
+    }
+    navigateTo(getParent(current));
   }
 
   function goBack() {
@@ -616,18 +623,33 @@
   async function openTerminal(p: string) {
     try { await api.openTerminal(p); } catch (err) { console.error("Open terminal failed:", err); }
   }
-  /** Trash-icon click on a row — stage the path for deletion/cleanup.
+  /** Trash-icon click on a row — stage the path for deletion.
    *  Desktop builds end with an actual trash call via DeletePanel; web
-   *  builds end with a script download or email notify via CleanupPanel.
-   *  The two queues are separate so their localStorage never collides. */
-  function targetForDeletion(p: string, size: number, owner: string) {
+   *  builds queue it on the server, where the nightly cron moves it to
+   *  `<fs>/.trash` after the 24h undo window (CleanupPanel). */
+  async function targetForDeletion(p: string, size: number, owner: string) {
     if (__DESKTOP__) {
       addToQueue(p, size);
       showToast(`Targeted for deletion (${deleteQueue.items.length})`);
-    } else {
-      addToCleanupQueue(p, size, owner);
-      showToast(`Targeted for cleanup (${cleanupQueue.items.length})`);
+      return;
     }
+    try {
+      await addToCleanupQueue(p, size, owner);
+      showToast(`Queued for trash (${cleanupQueue.items.length})`);
+    } catch (err: any) {
+      showToast(err?.message ?? "Could not queue for trash");
+    }
+  }
+
+  /** Web build: the trash icon follows the server's rules — own items,
+   *  any item for global admins or inside a storage admin's roots, and only
+   *  inside a FILESYSTEMS entry (never the filesystem row itself). */
+  function canDeleteWeb(p: string, owner: string): boolean {
+    return canTrash(
+      { username: State.username, isAdmin: State.isAdmin, roots: State.roots, filesystems: api.filesystems },
+      p,
+      owner,
+    );
   }
 
   function showToast(msg: string) {
@@ -666,6 +688,8 @@
     // reading the cache.
     if (!__DESKTOP__) {
       await api.probeHealth();
+      // Badge count for the trash cart; the panel reloads it on open.
+      loadCleanupQueue().catch(() => {});
     }
 
     fullPath = path;
@@ -769,7 +793,7 @@
       <button
         class="btn relative"
         onclick={() => (cleanupQueue.panelOpen = true)}
-        title="Review cleanup queue"
+        title="Review trash"
         disabled={cleanupQueue.items.length === 0}
       >
         <div class="flex items-center gap-1">
@@ -864,6 +888,7 @@
           onReveal={__DESKTOP__ ? revealPath : undefined}
           onTerminal={__DESKTOP__ ? openTerminal : undefined}
           onDelete={targetForDeletion}
+          canDelete={__DESKTOP__ ? undefined : canDeleteWeb}
           onUserHover={showTip}
           onUserMove={moveTip}
           onUserLeave={hideTip}
@@ -882,6 +907,7 @@
           {userColors}
           onCopyPath={copyPath}
           onDelete={targetForDeletion}
+          canDelete={__DESKTOP__ ? undefined : canDeleteWeb}
         />
       {/each}
 

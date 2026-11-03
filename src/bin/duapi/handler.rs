@@ -27,11 +27,15 @@ use crate::get_users;
 /// per-request query). The frontend uses it to invalidate its browser-side
 /// cache when the DB is rebuilt; null means no usable DB is loaded and
 /// clients fall back to TTL-only expiry.
+///
+/// `filesystems` is the `FILESYSTEMS` list: the SPA sends "up" from one of
+/// them to the home page and only offers the trash icon inside them.
 pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "smtp_configured": email::is_configured(),
         "db_version": crate::db_version(),
+        "filesystems": crate::filesystems(),
     }))
 }
 
@@ -144,10 +148,15 @@ pub async fn get_folders_handler(
         Some(p) => p.clone(),
         None => return crate::db_unavailable(),
     };
+    // Home page with FILESYSTEMS set: one row per filesystem, not `/`.
+    let filesystems = if path.is_empty() { crate::filesystems() } else { Vec::new() };
+    let home = (!filesystems.is_empty())
+        .then(|| crate::home::rows_for(&claims, &filesystems, &access, requested.clone()));
     let path_for_task = path.clone();
     let age_filter = q.age;
-    let fut = tokio::task::spawn_blocking(move || {
-        db::list_children(&pool, &path_for_task, &requested, age_filter)
+    let fut = tokio::task::spawn_blocking(move || match home {
+        Some((rows, users)) => db::folder_stats(&pool, &rows, &users, age_filter),
+        None => db::list_children(&pool, &path_for_task, &requested, age_filter),
     });
 
     let items = match fut.await {
@@ -160,7 +169,8 @@ pub async fn get_folders_handler(
                 .into_response();
         }
         Ok(Ok(mut v)) => {
-            if navigable {
+            // Home rows are already scoped by home::rows_for.
+            if navigable && filesystems.is_empty() {
                 dutopia::authz::filter_navigable_children(&claims.roots, &mut v);
             }
             let cap = crate::query::max_page_size();
@@ -315,4 +325,4 @@ pub async fn get_files_handler(claims: Claims, Query(q): Query<FilesQuery>) -> i
 
 #[cfg(test)]
 #[path = "handler_tests.rs"]
-mod tests;
+pub(crate) mod tests;

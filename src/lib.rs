@@ -5,6 +5,7 @@ pub mod authz;
 pub mod storage;
 pub mod db;
 pub mod filepack;
+pub mod filesystems;
 pub mod item;
 pub mod query;
 pub mod analytic;

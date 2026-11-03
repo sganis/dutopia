@@ -57,7 +57,7 @@ Each binary is a directory with focused modules under `src/bin/<name>/`:
 - **duscan** — Multi-threaded filesystem scanner. Streams metadata as CSV/zstd with 32MB buffer batching.
 - **dusum** — Aggregates raw scan data into rollups by folder, user, and age bucket (0=<60d, 1=60-600d, 2=>600d).
 - **dudb** — Builds the SQLite DB from the dusum CSV (`paths`/`users`/`stats` tables). With `--raw scan.csv` it also builds the file index so `/api/files` is served from the DB instead of a live filesystem read (required in production where the API host cannot see the scanned filesystem): `folder_files` holds one `filepack` blob per folder: totals of all its files per (user, age), plus only the `--max-files` (default 100) largest files of at least `--min-file-size` (default 1M) per (folder, user, age). The raw pass external-sorts rows by (folder_id, name) (`extsort.rs`) so each folder's files arrive together, then `folder_pack.rs` totals, caps and packs them. `--no-files` builds a folders-only DB on purpose (duapi then lists no files and never reads the disk). Builds into `<output>.building`, renames on success, and leaves the DB in DELETE journal mode. Resolves uid→username via the local account database, so run it on a host in the same identity domain as dusum.
-- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` returns `{ files, totals }`: from the DB `folder_files` index when present (`has_files` metadata), largest first and clamped to `files_cap`; nothing for a `--no-files` DB; else a live `read_dir`. Boots without a usable DB (missing file / wrong schema): SPA, login and health still serve, DB endpoints return 503. `/api/health` returns `db_version` (the DB's `built_at`) so the SPA can drop its cache when the DB is rebuilt.
+- **duapi** — Axum REST API with JWT auth over the dudb SQLite DB, optional TLS. Serves the Svelte SPA from `browser/public/`. `/api/files` returns `{ files, totals }`: from the DB `folder_files` index when present (`has_files` metadata), largest first and clamped to `files_cap`; nothing for a `--no-files` DB; else a live `read_dir`. Boots without a usable DB (missing file / wrong schema): SPA, login and health still serve, DB endpoints return 503. `/api/health` returns `db_version` (the DB's `built_at`) so the SPA can drop its cache when the DB is rebuilt. With `FILESYSTEMS` set, the home page lists the filesystems and `/api/trash` keeps the trash cart in `$TRASH_DIR/queue.json` (`trash.rs`): Keep is the 24h undo, then `script/trash_mover.py` (root cron on a node that mounts the filesystems) claims the items, moves them to `<fs>/.trash/<date>/…` (folders as `.tar.zst`) and purges after 30 days.
 - **duxray** — Storage X-ray: one-pass statistics over a duscan raw CSV (size bands, age/abandonment by owner and project, junk files, permission red flags, top-N). Constant memory; `--hardlinks` dedups inodes.
 - **duhuman** — Converts machine data (epochs, UIDs, mode bits) to human-readable format. Single-file binary.
 - **duzip** — Bidirectional CSV ↔ Zstandard compression. Single-file binary.
@@ -65,10 +65,11 @@ Each binary is a directory with focused modules under `src/bin/<name>/`:
 
 ### Shared Library (src/)
 
-- `lib.rs` — Re-exports util, auth, authz, storage, db, filepack, item, query, analytic
+- `lib.rs` — Re-exports util, auth, authz, storage, db, filepack, filesystems, item, query, analytic
 - `auth.rs` — JWT authentication with platform-specific credential verification (macOS: dscl, Linux: su). `Claims` carries `sub`, `is_admin`, `roots`
 - `authz.rs` — Three tiers shared by REST and MCP: global admin (`GLOBAL_ADMINS`), storage admin (`STORAGE_ADMINS`: full admin inside assigned roots, self-only elsewhere, may navigate the ancestors of their roots), regular user (own files only). `check_access` returns `Full` or `Navigable`
 - `db.rs` — Read-only SQLite pool + queries over the dudb DB (`list_children`, `list_files`, `has_files`, `files_cap`, `built_at`). Falls back to the `unix-none` VFS when the mount has no POSIX locks (NFSv3 `local_lock=none`); dudb does the same when building
+- `filesystems.rs` — `FILESYSTEMS` parsing and `fs_of` (longest mount-point prefix, `/`-bounded)
 - `filepack.rs` — Binary format of the per-folder file blobs (columnar varints + zstd), shared by dudb and duapi
 - `item.rs` — Live-filesystem file listing (`get_items`), the /api/files fallback when the DB has no file index
 - `storage.rs` — Cross-platform storage info (Unix: statvfs, Windows: Win32 API)
@@ -89,6 +90,10 @@ POST /api/login                         # Returns JWT
 GET  /api/users                         # List usernames
 GET  /api/folders?path=&users=&age=     # Folder statistics
 GET  /api/files?path=&users=&age=       # File listing
+GET  /api/trash                         # Trash cart: items the caller may manage
+POST /api/trash                         # Queue {path,size,owner} for the trash
+DELETE /api/trash?path=                 # Keep: the 24h undo
+POST /api/trash/claim                   # Cron only (Bearer TRASH_TOKEN): items queued >24h, removed
 ```
 
 ### CSV Format (scanner output)
@@ -109,6 +114,9 @@ Uses `#[cfg(...)]` conditional compilation throughout. Key differences:
 - `JWT_SECRET` — Secret for JWT token signing (duapi)
 - `GLOBAL_ADMINS` — Comma-separated global admins: usernames, or Keycloak groups/realm roles on OIDC (duapi). `ADMIN_GROUP` is the deprecated name, still honored
 - `STORAGE_ADMINS` — Scoped admins, e.g. `user1:/red/peddn7,/red/peddn8;user2:/red/ssd` (duapi)
+- `FILESYSTEMS` — Comma-separated mount points duscan scans (duapi). The home page (`/api/folders?path=`) lists one row per filesystem instead of `/`; only paths inside them can be trashed. `/api/health` returns the list
+- `TRASH_DIR` — Folder of the trash queue `queue.json` (duapi, default `/data/trash`)
+- `TRASH_TOKEN` — Bearer token the trash cron (`script/trash_mover.py`) sends to `POST /api/trash/claim`; claim is refused when unset
 - `ADMIN_PASSWORD` — Password login with this value succeeds for any username, as global admin. Active in release builds too (container mode with no local accounts), so treat it as a secret
 
 ## CI/CD

@@ -9,7 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile } from "./models";
+import type { FilesResult, ScannedFile, TrashEntry } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
 export type RawFolder = { path: string; users: Record<string, Record<"0" | "1" | "2", AgeMini>> };
@@ -114,6 +114,13 @@ class Api {
   // via delete_path, so these are stubs; the CleanupPanel is only mounted
   // under `!__DESKTOP__` and should never reach them.
   async probeHealth(): Promise<void> { /* noop on desktop */ }
+  /** No FILESYSTEMS on desktop: no server-side trash. */
+  public filesystems: string[] = [];
+  async trashList(): Promise<TrashEntry[]> { throw new Error(WEB_ONLY); }
+  async trashAdd(_path: string, _size: number, _owner: string): Promise<TrashEntry> {
+    throw new Error(WEB_ONLY);
+  }
+  async trashKeep(_path: string): Promise<TrashEntry> { throw new Error(WEB_ONLY); }
   async cleanupScript(_username: string, _paths: { path: string; size: number }[]): Promise<Blob> {
     throw new Error(WEB_ONLY);
   }

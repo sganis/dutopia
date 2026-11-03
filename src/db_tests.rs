@@ -253,3 +253,30 @@ fn open_pool_rejects_missing_metadata() {
     let _ = std::fs::remove_file(&path);
     assert!(err.contains("metadata") || err.contains("schema"));
 }
+
+#[test]
+fn folder_stats_returns_the_paths_own_rows() {
+    let (_db, pool) = build_pool();
+    let paths = vec!["/docs".to_string(), "/".to_string(), "/nope".to_string()];
+    let rows = folder_stats(&pool, &paths, &[], None).unwrap();
+    let got: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+    // Sorted by path like list_children; unknown paths are absent.
+    assert_eq!(got, vec!["/", "/docs"]);
+    let root = &rows[0];
+    assert_eq!(root.users["alice"]["0"].size, 200);
+    assert_eq!(root.users["bob"]["1"].size, 50);
+}
+
+#[test]
+fn folder_stats_user_and_age_filters() {
+    let (_db, pool) = build_pool();
+    let paths = vec!["/".to_string(), "/docs".to_string()];
+    let bob = folder_stats(&pool, &paths, &["bob".to_string()], None).unwrap();
+    assert_eq!(bob.len(), 1);
+    assert_eq!(bob[0].path, "/");
+    assert!(!bob[0].users.contains_key("alice"));
+    let old = folder_stats(&pool, &paths, &[], Some(2)).unwrap();
+    assert_eq!(old.len(), 1);
+    assert_eq!(old[0].path, "/docs");
+    assert!(folder_stats(&pool, &[], &[], None).unwrap().is_empty());
+}
