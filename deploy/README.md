@@ -86,16 +86,53 @@ connections reopen the new file.
 
 ## 6. Deploy
 
-Edit the image reference and Route host in `duapi.yaml`, and the OIDC values in
-`config.example.yaml`, then:
+### First install
+
+Edit, in `deploy/openshift/`:
+
+- `duapi.yaml`: the image (the tag you pushed in step 4) and the Route host.
+- `config.example.yaml`: the OIDC values, `GLOBAL_ADMINS`, and `FILESYSTEMS`:
+  the mount points duscan scans, comma-separated, exactly as they appear in
+  the UI (e.g. `/red/nas1,/red/nas2`). The home page lists them and the trash
+  works only inside them. Leave it unset and there is no trash.
 
 ```bash
 oc new-project dutopia
-./deploy/openshift/secret.example.sh
+./deploy/openshift/secret.example.sh      # JWT_SECRET, TRASH_TOKEN (saved to ./trash.token), OIDC secret
 oc apply -f deploy/openshift/config.example.yaml
 oc apply -f deploy/openshift/duapi.yaml
 oc rollout status deploy/duapi
 ```
+
+Keep `trash.token` (git ignores it) for the trash cron and in your password
+manager; it is the same value as the Secret's `TRASH_TOKEN`.
+
+### Upgrade an existing deployment
+
+```bash
+# 1. New image (steps 2-4), then point the Deployment at it:
+oc set image deploy/duapi duapi=registry.corp.local/dutopia/duapi:<new-tag>
+
+# 2. Config: add FILESYSTEMS (and any other new keys) and re-apply.
+oc apply -f deploy/openshift/config.example.yaml
+
+# 3. Secret: secret.example.sh only creates; add the trash token to the
+#    existing Secret instead.
+[ -f trash.token ] || (umask 077; openssl rand -hex 32 > trash.token)
+oc set data secret/duapi-secret --from-file=TRASH_TOKEN=trash.token
+
+# 4. One pod at a time (the trash queue has a single writer). Switching an
+#    existing Deployment to Recreate with `oc apply` fails on the leftover
+#    rollingUpdate block, so patch it once:
+oc patch deploy/duapi -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+
+# 5. ConfigMap and Secret are read at pod start:
+oc rollout restart deploy/duapi
+oc rollout status deploy/duapi
+```
+
+Then upgrade the trash cron on its node(s) ([TRASH.md](TRASH.md)): always
+duapi first, the cron second.
 
 ## 7. Load the database
 
@@ -122,82 +159,33 @@ Serving on http://0.0.0.0:8080  (static dir: /app/public)
 ```
 
 `File index: absent` means the DB was built without `--raw`.
-With `FILESYSTEMS` set, the log also shows `FILESYSTEMS=...` and
-`Trash queue: /data/trash/queue.json (claim enabled)`.
+
+With `FILESYSTEMS` set, the log also shows:
+
+```
+FILESYSTEMS=/red/nas1,/red/nas2
+Trash queue: /data/trash/queue.json (claim enabled)
+```
+
+`(claim disabled: TRASH_TOKEN not set)` means the Secret lacks `TRASH_TOKEN`
+(step 6, upgrade 3). Then check from anywhere, and that the pod can write the
+queue on the PVC:
+
+```bash
+curl -s https://dutopia.apps.ocp.corp.local/api/health
+# {"filesystems":["/red/nas1","/red/nas2"],"trash_undo_hours":24,...}
+oc exec deploy/duapi -- sh -c 'mkdir -p /data/trash && touch /data/trash/.w && rm /data/trash/.w && echo writable'
+```
+
+In the UI the home page lists the filesystems; trash something, then
+`oc exec deploy/duapi -- cat /data/trash/queue.json` shows it.
 
 ## 9. Trash cron
 
-Without `FILESYSTEMS` the web UI shows no trash icon, so the trash cart (and
-its Cleanup script / Notify buttons) is not available. With it, the trash
-icon queues items in `/data/trash/queue.json` (on the PVC). Keep in
-the UI undoes it for 24h. After that, a cron on a node that mounts the
-filesystems moves them to `<fs>/.trash/<date>/…`, packs folders into
-`.tar.zst`, and deletes trash older than 30 days. Users cannot restore after
-the 24h window; admins can, from `<fs>/.trash` until the purge.
-
-On that node, as root (Python 3, GNU tar and zstd):
-
-```bash
-install -D -m 0755 script/trash_mover.py /opt/dutopia/trash_mover.py
-install -D -m 0644 script/trash_fsops.py /opt/dutopia/trash_fsops.py  # next to it
-install -D -m 0600 trash.token /etc/dutopia/trash.token   # same value as the Secret
-crontab -e
-0 2 * * * python3 /opt/dutopia/trash_mover.py --api https://dutopia.apps.ocp.corp.local --token-file /etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2
-```
-
-`--fs` (one per FILESYSTEMS entry) limits what root may touch to those
-filesystems even if the API were compromised; keep it. The script refuses a
-plain-http `--api`, owners below uid 1000 (`--min-uid`), folders that hold
-another owner's files or another mount, paths reached through a symlink, and
-a `<fs>/.trash` that is a symlink or not root's. The node must mount the
-filesystems with root access (no `root_squash`), or the renames fail.
-
-Each node claims only the items of the FILESYSTEMS entries it mounts (it
-reads the list from `/api/health`), so with several cron nodes, each one takes
-its own filesystems and leaves the rest queued. One run at a time per node
-(`/var/lib/dutopia-trash/.lock`).
-
-Claiming records each item as *being moved*; after the run the cron reports
-what it did (`POST /api/trash/report`, in chunks of 100). The trash panel's
-**History** tab shows each item as being moved, moved (and where to), skipped
-(and why: gone, not owned by its owner any more, a folder holding other
-users' files, …), failed, or kept (and by whom). Keep on an item the cron
-already took says what happened instead of failing silently, and an item the
-cron moved cannot be queued again until the next scan drops it from the
-listing. Due items of a filesystem removed from FILESYSTEMS are retired as
-skipped (no node would ever take them).
-
-**Upgrade duapi before the cron.** A cron asks the server to confirm
-`--dry-run` and the per-node filter; against an older duapi that ignores
-them, a dry run would really claim the items, so the cron stops, saves them
-to the state dir and tells you to rerun with `--batch` after upgrading.
-
-Check before the first real run, as root: it lists what it would move or
-purge and changes nothing (the items stay queued):
-
-```bash
-python3 /opt/dutopia/trash_mover.py --api https://dutopia.apps.ocp.corp.local \
-  --token-file /etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2 --dry-run
-```
-
-Each run saves what it claimed to `/var/lib/dutopia-trash/<date>.json`; if a
-run dies halfway, rerun that batch with `--batch /var/lib/dutopia-trash/<date>.json`.
-Add `--cafile` when the Route uses a private CA. `TRASH_UNDO_HOURS` (duapi,
-default 24) sets how long Keep can undo.
-
-**Restore** (admins, until the 30-day purge). The trash keeps the path under
-`<fs>/.trash/<date>/`; History shows the exact archive. A folder comes back
-with its owners and modes:
-
-```bash
-tar --use-compress-program 'zstd -d' -xpf /red/nas1/.trash/2026-11-04/proj/run1.tar.zst -C /red/nas1/proj
-mv /red/nas1/.trash/2026-11-04/proj/file.dat /red/nas1/proj/   # a single file
-```
-
-**Local test** (macOS/Linux, no root, no mounts): start duapi with
-`FILESYSTEMS=<dirs> TRASH_TOKEN=x TRASH_UNDO_HOURS=0`, queue something in the
-UI, then `TRASH_TOKEN=x python3 script/trash_mover.py --dev --api http://localhost:8080`
-(add `--dry-run` to only look).
+The trash icon only queues items; a root cron on a node that mounts the
+filesystems moves them to `<fs>/.trash` after the 24h undo window and purges
+them after 30 days. Install, dry run, schedule, rerun, restore and
+troubleshooting: **[TRASH.md](TRASH.md)**.
 
 ---
 
