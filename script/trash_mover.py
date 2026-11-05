@@ -6,7 +6,7 @@
 
 move: claim the items queued over TRASH_UNDO_HOURS ago on the filesystems
 this node mounts, save the batch, move each to <fs>/.trash/<date>/<path>
-(folders as .tar.zst), report the results. Items that are gone, not their
+(folders as .tar.zst), log each result. Items that are gone, not their
 owner's, a folder holding other owners' files, or reached through a symlink
 are skipped (see trash_fsops.py).
 purge: delete <fs>/.trash/<date> folders older than TRASH_KEEP_DAYS.
@@ -30,8 +30,6 @@ from trash_fsops import (  # noqa: F401  (re-exported for callers and tests)
 
 STATE_DIR = "/var/lib/dutopia-trash"
 KEEP_DAYS = 30
-# Results per POST /api/trash/report (~300 B each, under duapi's 64 KiB).
-REPORT_CHUNK = 100
 
 
 def log(tag, msg):
@@ -94,21 +92,6 @@ def claim(api, token, cafile=None, timeout=120, allow_http=False, dry_run=False,
     return items
 
 
-def report(api, token, results, cafile=None, allow_http=False):
-    """POST the results in chunks: duapi caps request bodies (64 KiB by
-    default). Returns the number of chunks that failed."""
-    failed = 0
-    for i in range(0, len(results), REPORT_CHUNK):
-        chunk = results[i:i + REPORT_CHUNK]
-        try:
-            call_api(api, "trash/report", token, body=chunk, cafile=cafile, allow_http=allow_http)
-        except Exception as e:
-            failed += 1
-            log("err", f"report of {len(chunk)} result(s): {e}")
-    log("report", f"{len(results)} result(s) sent" + (f", {failed} chunk(s) failed" if failed else ""))
-    return failed
-
-
 def acquire_lock(state_dir):
     """Hold <state_dir>/.lock for this run; BlockingIOError if another run
     holds it (a run with huge folders to pack can outlast a day)."""
@@ -159,18 +142,12 @@ def seen_filesystems(state_dir):
 
 
 def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
-        allowed_fs=None, min_uid=None, dry_run=False, results=None, do_purge=True,
-        mover=None):
+        allowed_fs=None, min_uid=None, dry_run=False, do_purge=True, mover=None):
     """Move every item (with `mover`, default move_item), then purge; return
     the number of failures. dry_run runs every check but moves and deletes
-    nothing. Each item's outcome (status moved/skipped/error, detail, dest)
-    is appended to `results` when given, for POST /api/trash/report."""
+    nothing. Each item's result is one log line: ok, skip or err."""
     errors = 0
     seen = set()
-
-    def outcome(item, status, detail="", dest=None):
-        if results is not None:
-            results.append({**item, "status": status, "detail": detail, "dest": dest})
 
     for item in items:
         if item.get("fs"):
@@ -183,14 +160,11 @@ def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
             else:
                 dest = (mover or move_item)(item, today, check_mount, allowed_fs, min_uid)
                 log("ok", f"{path} -> {dest}")
-                outcome(item, "moved", dest=dest)
         except Skip as e:
             log("skip", f"{path}: {e}")
-            outcome(item, "skipped", str(e))
         except Exception as e:  # keep going: one bad item must not stop the batch
             errors += 1
             log("err", f"{path}: {e}")
-            outcome(item, "error", str(e))
     if not do_purge:
         return errors
     targets = seen | seen_filesystems(state_dir) | {p.rstrip("/") or "/" for p in purge_fs}
@@ -272,8 +246,8 @@ def local_filesystems(server_fs, allowed, check_mount=True):
 
 
 def work(args, ap, today, allowed, purge_fs):
-    """Claim (or load --batch) and move, then purge, then report, as the
-    command allows (move, purge, or both); return the exit code."""
+    """Claim (or load --batch) and move, then purge, as the command allows
+    (move, purge, or both); return the exit code."""
     errors = 0
     do_move, do_purge = not args.purge_only, not args.move_only
     token = read_token(args)
@@ -317,13 +291,9 @@ def work(args, ap, today, allowed, purge_fs):
         items, failed = got
         errors += failed
 
-    results = []
     errors += run(items, today, args.state_dir, keep_days, purge_fs,
                   check_mount=not args.no_mount_check, allowed_fs=allowed,
-                  min_uid=args.min_uid, dry_run=args.dry_run, results=results,
-                  do_purge=do_purge)
-    if results and not args.dry_run and args.api and token:
-        errors += report(args.api, token, results, args.cafile, args.allow_http)
+                  min_uid=args.min_uid, dry_run=args.dry_run, do_purge=do_purge)
     return 1 if errors else 0
 
 

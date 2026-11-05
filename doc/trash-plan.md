@@ -111,10 +111,11 @@ Found while building and reviewing it (see `deploy/README.md` §9):
   queued children of the same owner and filesystem.
 - **Per-node claim**: the cron reads FILESYSTEMS from `/api/health` and claims
   only the filesystems it mounts (`?fs=`), so several cron nodes coexist.
-- **History** (`history.json`): claim records "claimed", the cron reports
-  moved/skipped/error in chunks, Keep records "kept". The panel's History tab
-  shows it; a late Keep says what happened; a moved item cannot be re-queued
-  until the next scan; due items of filesystems no longer listed are retired.
+- **No history**: a claimed item leaves `queue.json`, the cron logs each
+  result on its node, and the next scan shows it under `<fs>/.trash` (or
+  `.archive`). An earlier `history.json` was dropped: the queue file only
+  ever holds what is waiting. Due items of filesystems no longer listed are
+  dropped at the next claim.
 - **Operations**: `trash_mover.py [move|purge]` (default both), `--dry-run`
   (server confirms it applied it, `X-Trash-Dry-Run`), `TRASH_KEEP_DAYS`,
   single-instance lock, `--batch` reruns, `TRASH_UNDO_HOURS`, `--dev` for local

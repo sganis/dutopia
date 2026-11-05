@@ -2,7 +2,7 @@
 import { State, API_URL } from "./store.svelte";
 import { fetchCached, initDbVersion } from './cache.js';
 import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile, TrashAction, TrashEntry, TrashOutcome } from "./models";
+import type { FilesResult, ScannedFile, TrashAction, TrashEntry } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
 export type RawFolder = { path: string; users: Record<string, Record<'0'|'1'|'2', AgeMini>> };
@@ -206,11 +206,6 @@ class Api {
    *  the stored entry. Queuing it for the other action switches it. */
   async trashAdd(path: string, size: number, owner: string, action: TrashAction = "trash"): Promise<TrashEntry> {
     return this.trashFetch<TrashEntry>("trash", "POST", { path, size, owner, action });
-  }
-
-  /** GET /api/trash/history: what the nightly run did, newest first. */
-  async trashHistory(): Promise<TrashOutcome[]> {
-    return this.trashFetch<TrashOutcome[]>("trash/history", "GET");
   }
 
   /** DELETE /api/trash?path= — Keep (the 1-day undo). */

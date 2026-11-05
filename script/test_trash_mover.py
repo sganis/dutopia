@@ -1,7 +1,9 @@
 # script/test_trash_mover.py
 # Run: python3 -m unittest script/test_trash_mover.py  (needs tar + zstd)
+import contextlib
 import datetime
 import http.server
+import io
 import json
 import os
 import pwd
@@ -23,8 +25,8 @@ TODAY = datetime.date(2026, 11, 4)
 
 class FakeApi:
     """A tiny duapi stand-in: GET /api/health lists `filesystems`, POST
-    /api/trash/claim returns `items`, POST /api/trash/report records the
-    body. Every request is kept in `requests` as (method, path, body)."""
+    /api/trash/claim returns `items`. Every request is kept in `requests` as
+    (method, path, body)."""
 
     def __init__(self, filesystems=(), items=(), honor=True, keep_days=None):
         self.filesystems, self.items, self.requests = list(filesystems), list(items), []
@@ -381,36 +383,19 @@ class Report(Fs):
         self._st.cleanup()
         super().tearDown()
 
-    def test_results_are_reported_to_the_server(self):
+    def test_results_are_logged_and_nothing_is_posted_back(self):
         f = self.mk("p/file")
         items = [self.item(f), self.item(self.fs + "/p/gone")]
-        with FakeApi(filesystems=[self.fs], items=items) as api:
+        out = io.StringIO()
+        with FakeApi(filesystems=[self.fs], items=items) as api, contextlib.redirect_stdout(out):
             rc = self._main(api)
         self.assertEqual(rc, 0)
-        (_, _, body, auth), = api.posts("/api/trash/report")
-        self.assertEqual(auth, "Bearer tok")
-        by_path = {o["path"]: o for o in body}
-        moved = by_path[f]
-        self.assertEqual(moved["status"], "moved")
-        self.assertTrue(moved["dest"].endswith("/p/file"))
-        self.assertEqual(moved["owner"], ME)
-        self.assertEqual(by_path[self.fs + "/p/gone"]["status"], "skipped")
-        self.assertIn("gone", by_path[self.fs + "/p/gone"]["detail"])
+        log = out.getvalue()
+        self.assertIn(f"[ok] {f} -> ", log)
+        self.assertIn(f"[skip] {self.fs}/p/gone: ", log)
+        self.assertEqual([r[1].split("?")[0] for r in api.requests if r[0] == "POST"], ["/api/trash/claim"])
 
-    def test_dry_run_reports_nothing(self):
-        items = [self.item(self.mk("p/file")), self.item(self.fs + "/p/gone")]
-        with FakeApi(filesystems=[self.fs], items=items) as api:
-            self._main(api, "--dry-run")
-        self.assertEqual(api.posts("/api/trash/report"), [])
-
-    def test_report_goes_in_chunks_under_the_body_limit(self):
-        items = [self.item(f"{self.fs}/gone/{i}") for i in range(250)]
-        with FakeApi(filesystems=[self.fs], items=items) as api:
-            self.assertEqual(self._main(api), 0)
-        sizes = [len(r[2]) for r in api.posts("/api/trash/report")]
-        self.assertEqual(sizes, [100, 100, 50])
-
-    def test_batch_rerun_reports_too(self):
+    def test_batch_rerun_moves_without_claiming(self):
         p = self.mk("p/file")
         batch = os.path.join(self.state, "b.json")
         with open(batch, "w") as f:
@@ -418,8 +403,7 @@ class Report(Fs):
         with FakeApi(filesystems=[self.fs]) as api:
             self.assertEqual(self._main(api, "--batch", batch), 0)
         self.assertEqual(api.posts("/api/trash/claim"), [])
-        (_, _, body, _), = api.posts("/api/trash/report")
-        self.assertEqual(body[0]["status"], "moved")
+        self.assertFalse(os.path.exists(p))
 
     def test_old_server_ignoring_dry_run_is_caught(self):
         p = self.mk("p/file")
@@ -461,7 +445,7 @@ class Report(Fs):
         self.assertEqual(rc, 1)
         self.assertEqual(api.posts("/api/trash/claim"), [])
 
-    def test_corrupt_saved_batch_still_processes_and_reports(self):
+    def test_corrupt_saved_batch_still_processes(self):
         with open(os.path.join(self.state, f"{datetime.date.today().isoformat()}.json"), "w") as f:
             f.write("{not json")
         p = self.mk("p/file")
@@ -469,7 +453,6 @@ class Report(Fs):
             rc = self._main(api)
         self.assertEqual(rc, 1)  # the save failed: flagged for the cron mail
         self.assertFalse(os.path.exists(p))  # but the claimed item was moved
-        self.assertEqual(len(api.posts("/api/trash/report")), 1)
 
 
 

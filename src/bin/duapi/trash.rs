@@ -12,8 +12,8 @@
 //                    the archive cron (?action=archive) packs them into
 //                    <fs>/.archive/<path>.<date>.tar.gz and keeps them.
 //
-// The queue is `$TRASH_DIR/queue.json` (default /data/trash, the PVC), one
-// JSON array guarded by a process-wide mutex and replaced by tmp + rename.
+// The queue is `$TRASH_DIR/queue.json` (trash_store.rs). It holds only what
+// waits: once claimed or kept, an item is gone from it.
 
 use axum::{
     extract::Query,
@@ -30,11 +30,10 @@ use dutopia::filesystems::fs_of;
 
 use crate::cleanup::{validate, PathItem};
 use crate::query::normalize_path;
-use crate::trash_history::{keep_too_late, latest_for, readd_blocked, Outcome};
 #[cfg(test)]
 pub use crate::trash_store::save;
 pub use crate::trash_store::{load, trash_dir};
-use crate::trash_store::{with_both, with_queue, Changed};
+use crate::trash_store::with_queue;
 
 /// Default days a moved item stays in `<fs>/.trash` before the cron purges it.
 pub const DEFAULT_KEEP_DAYS: i64 = 30;
@@ -92,14 +91,6 @@ impl Action {
         match self {
             Action::Trash => "trash",
             Action::Archive => "archive",
-        }
-    }
-
-    /// The folder at the filesystem root the cron puts the item in.
-    pub fn dir(self) -> &'static str {
-        match self {
-            Action::Trash => ".trash",
-            Action::Archive => ".archive",
         }
     }
 }
@@ -282,18 +273,12 @@ pub async fn add_handler(claims: Claims, Json(req): Json<AddReq>) -> Response {
         action: req.action,
     };
     let actor = claims.sub.clone();
-    let built_at = crate::db_version().and_then(|v| v.parse::<i64>().ok());
-    let res = with_both(move |q, history| {
-        if let Some(why) = readd_blocked(latest_for(history, &entry.path, &claims), built_at) {
-            return (Err((StatusCode::CONFLICT, why)), Changed::default());
+    let res = with_queue(move |q| match place(q, entry, &claims) {
+        Ok((code, e)) => {
+            let changed = code == StatusCode::CREATED;
+            (Ok((code, e)), changed)
         }
-        match place(q, entry, &claims) {
-            Ok((code, e)) => {
-                let queue = code == StatusCode::CREATED;
-                (Ok((code, e)), Changed { queue, history: false })
-            }
-            Err(err) => (Err(err), Changed::default()),
-        }
+        Err(err) => (Err(err), false),
     })
     .await;
     match res {
@@ -363,8 +348,8 @@ fn place(
 
 enum KeepOutcome {
     Kept(Entry),
-    /// Not queued: the answer explains what became of it.
-    Gone(Response),
+    /// Not queued (never, kept already, or claimed by the cron).
+    Gone,
     Forbidden,
 }
 
@@ -377,21 +362,12 @@ pub async fn keep_handler(claims: Claims, Query(q): Query<KeepQuery>) -> Respons
         return bad_request(&claims.sub, format!("invalid path: {raw}"));
     };
     let actor = claims.sub.clone();
-    let now = Utc::now().timestamp();
-    let res = with_both(move |queue, history| match queue.iter().position(|e| e.path == path) {
-        None => {
-            let answer = keep_too_late(latest_for(history, &path, &claims));
-            (KeepOutcome::Gone(answer), Changed::default())
-        }
+    let res = with_queue(move |queue| match queue.iter().position(|e| e.path == path) {
+        None => (KeepOutcome::Gone, false),
         Some(i) if !can_manage(&claims, &queue[i].owner, &queue[i].path) => {
-            (KeepOutcome::Forbidden, Changed::default())
+            (KeepOutcome::Forbidden, false)
         }
-        Some(i) => {
-            let e = queue.remove(i);
-            let who = format!("kept by {}", claims.sub);
-            history.push(Outcome::new(e.clone(), "kept", who, now));
-            (KeepOutcome::Kept(e), Changed { queue: true, history: true })
-        }
+        Some(i) => (KeepOutcome::Kept(queue.remove(i)), true),
     })
     .await;
     match res {
@@ -399,7 +375,11 @@ pub async fn keep_handler(claims: Claims, Query(q): Query<KeepQuery>) -> Respons
             tracing::info!(actor = %actor, path = %e.path, "200 OK DELETE /api/trash (kept)");
             Json(e).into_response()
         }
-        Ok(KeepOutcome::Gone(answer)) => answer,
+        Ok(KeepOutcome::Gone) => (
+            StatusCode::NOT_FOUND,
+            "not in the queue: kept already, or the nightly run took it",
+        )
+            .into_response(),
         Ok(KeepOutcome::Forbidden) => {
             tracing::warn!(actor = %actor, "403 Forbidden DELETE /api/trash");
             AuthError::Forbidden.into_response()

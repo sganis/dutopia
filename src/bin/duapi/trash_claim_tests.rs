@@ -1,7 +1,9 @@
-// rs/src/bin/duapi/trash_history_tests.rs
-// Claim, report, history and the Keep/re-add answers that depend on them.
+// rs/src/bin/duapi/trash_claim_tests.rs
+// Claim: the token, the 24h rule, dry run, per-node filesystems, actions,
+// and what is left for Keep and re-add once an item is claimed.
 use super::*;
 use crate::trash::tests::*;
+use dutopia::auth::Claims;
 use crate::trash::{add_handler, keep_handler, load, save, AddReq, Entry, KeepQuery, CLAIM_AFTER_SECS};
 use axum::body::to_bytes;
 use axum::extract::Query;
@@ -95,74 +97,7 @@ async fn claim_takes_only_the_requested_filesystems() {
 }
 
 
-// ---- report + history: what happened to each claimed item ----
-
-
-fn outcome(e: &Entry, status: &str, detail: &str, done_at: i64) -> Outcome {
-    Outcome { entry: e.clone(), status: status.into(), detail: detail.into(), dest: None, done_at }
-}
-
-async fn report(auth: Option<&str>, outcomes: Vec<Outcome>) -> StatusCode {
-    let mut headers = HeaderMap::new();
-    if let Some(a) = auth {
-        headers.insert("authorization", HeaderValue::from_str(a).unwrap());
-    }
-    report_handler(headers, Json(outcomes)).await.status()
-}
-
-async fn history(c: &Claims) -> Vec<Outcome> {
-    let resp = history_handler(c.clone()).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    serde_json::from_slice(&to_bytes(resp.into_body(), LIMIT).await.unwrap()).unwrap()
-}
-
-#[tokio::test]
-#[serial]
-async fn report_needs_the_token_and_feeds_a_scoped_history() {
-    let _dir = setup();
-    let a = entry("/red/nas1/a", "alice", 1);
-    let b = entry("/red/nas1/b", "bob", 1);
-    let sent = vec![outcome(&a, "moved", "", 0), outcome(&b, "skipped", "gone", 0)];
-    assert_eq!(report(Some("Bearer nope"), sent.clone()).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(report(Some("Bearer s3cret"), sent).await, StatusCode::OK);
-    let mine = history(&claims("alice", false, &[])).await;
-    assert_eq!(mine.len(), 1);
-    assert_eq!((mine[0].entry.path.as_str(), mine[0].status.as_str()), ("/red/nas1/a", "moved"));
-    assert!(mine[0].done_at > 0, "server stamps done_at");
-    assert_eq!(history(&claims("root", true, &[])).await.len(), 2);
-}
-
-#[tokio::test]
-#[serial]
-async fn report_rejects_unknown_status() {
-    let _dir = setup();
-    let a = entry("/red/nas1/a", "alice", 1);
-    assert_eq!(report(Some("Bearer s3cret"), vec![outcome(&a, "exploded", "", 0)]).await,
-               StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-#[serial]
-async fn keep_after_the_cron_took_it_explains_what_happened() {
-    let _dir = setup();
-    let a = entry("/red/nas1/a", "alice", 1);
-    assert_eq!(report(Some("Bearer s3cret"), vec![outcome(&a, "moved", "", 0)]).await, StatusCode::OK);
-    let alice = claims("alice", false, &[]);
-    assert_eq!(keep(&alice, Some("/red/nas1/a")).await, StatusCode::GONE);
-    // Someone who cannot see it gets the plain 404.
-    assert_eq!(keep(&claims("bob", false, &[]), Some("/red/nas1/a")).await, StatusCode::NOT_FOUND);
-}
-
-#[test]
-fn trim_history_keeps_the_newest() {
-    let e = entry("/red/nas1/a", "alice", 1);
-    let mut h: Vec<Outcome> = (0..5).map(|i| outcome(&e, "moved", "", i)).collect();
-    trim_history(&mut h, 3);
-    assert_eq!(h.iter().map(|o| o.done_at).collect::<Vec<_>>(), vec![2, 3, 4]);
-}
-
-
-// ---- claim → claimed → report lifecycle (review 2) ----
+// ---- after the claim ----
 
 async fn add_full(c: &Claims, path: &str, owner: &str) -> (StatusCode, String) {
     let req = AddReq { path: path.into(), size: 100, owner: owner.into(), action: Default::default() };
@@ -204,41 +139,7 @@ async fn claim_with_root_filesystem() {
 
 #[tokio::test]
 #[serial]
-async fn claimed_items_are_visible_and_locked_until_reported() {
-    let _dir = setup();
-    let a = due("/red/nas1/a", "alice", "/red/nas1");
-    save(_dir.path(), &[a.clone()]).unwrap();
-    assert_eq!(claim(Some("Bearer s3cret")).await.1, vec![a.clone()]);
-    let alice = claims("alice", false, &[]);
-    let h = history(&alice).await;
-    assert_eq!((h.len(), h[0].status.as_str()), (1, "claimed"));
-    let (code, body) = keep_full(&alice, "/red/nas1/a").await;
-    assert_eq!(code, StatusCode::GONE);
-    assert!(body.contains("moving it"), "{body}");
-    assert_eq!(add_full(&alice, "/red/nas1/a", "alice").await.0, StatusCode::CONFLICT);
-    // The report supersedes the claim; a later "skipped: gone" cannot undo "moved".
-    let mut moved = outcome(&a, "moved", "", 0);
-    moved.dest = Some("/red/nas1/.trash/d/a".into());
-    assert_eq!(report(Some("Bearer s3cret"), vec![moved]).await, StatusCode::OK);
-    assert_eq!(report(Some("Bearer s3cret"), vec![outcome(&a, "skipped", "gone", 0)]).await, StatusCode::OK);
-    let h = history(&alice).await;
-    assert_eq!(h.len(), 1, "{h:?}");
-    assert_eq!(h[0].status, "moved");
-}
-
-#[tokio::test]
-#[serial]
-async fn report_cannot_claim_server_statuses() {
-    let _dir = setup();
-    let a = due("/red/nas1/a", "alice", "/red/nas1");
-    for s in ["claimed", "kept"] {
-        assert_eq!(report(Some("Bearer s3cret"), vec![outcome(&a, s, "", 0)]).await, StatusCode::BAD_REQUEST);
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn claim_retires_entries_of_unlisted_filesystems() {
+async fn claim_drops_entries_of_unlisted_filesystems() {
     let dir = setup();
     let gone_fs = due("/red/old/a", "alice", "/red/old");
     let mine = due("/red/nas1/b", "alice", "/red/nas1");
@@ -247,9 +148,6 @@ async fn claim_retires_entries_of_unlisted_filesystems() {
     let q = ClaimQuery { dry_run: None, fs: Some("/red/nas2".into()), action: None };
     assert!(claim_q(Some("Bearer s3cret"), q).await.1.is_empty());
     assert_eq!(load(dir.path()).unwrap(), vec![mine]);
-    let h = history(&claims("root", true, &[])).await;
-    assert_eq!(h[0].status, "skipped");
-    assert!(h[0].detail.contains("FILESYSTEMS"), "{}", h[0].detail);
 }
 
 #[tokio::test]
@@ -261,34 +159,6 @@ async fn claim_confirms_the_options_it_applied() {
     assert_eq!(h.get("x-trash-fs-filter").unwrap(), "1");
     let h = claim_headers(ClaimQuery { dry_run: None, fs: None, action: None }).await;
     assert!(h.get("x-trash-dry-run").is_none());
-}
-
-#[tokio::test]
-#[serial]
-async fn keep_wording_follows_the_outcome_and_keeps_are_recorded() {
-    let dir = setup();
-    let a = due("/red/nas1/a", "alice", "/red/nas1");
-    assert_eq!(report(Some("Bearer s3cret"), vec![outcome(&a, "skipped", "gone", 0)]).await, StatusCode::OK);
-    let alice = claims("alice", false, &[]);
-    let (code, body) = keep_full(&alice, "/red/nas1/a").await;
-    assert_eq!(code, StatusCode::GONE);
-    assert!(body.contains("left it in place"), "{body}");
-    // Re-queue then Keep: the Keep is recorded, and a second Keep is a plain 404.
-    save(dir.path(), &[a.clone()]).unwrap();
-    assert_eq!(keep(&alice, Some("/red/nas1/a")).await, StatusCode::OK);
-    assert_eq!(history(&alice).await[0].status, "kept");
-    assert_eq!(keep(&alice, Some("/red/nas1/a")).await, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-#[serial]
-async fn add_refuses_an_item_already_moved_since_the_scan() {
-    let _dir = setup();
-    let a = due("/red/nas1/a", "alice", "/red/nas1");
-    assert_eq!(report(Some("Bearer s3cret"), vec![outcome(&a, "moved", "", 0)]).await, StatusCode::OK);
-    let (code, body) = add_full(&claims("alice", false, &[]), "/red/nas1/a", "alice").await;
-    assert_eq!(code, StatusCode::CONFLICT);
-    assert!(body.contains("already moved"), "{body}");
 }
 
 #[tokio::test]
@@ -319,4 +189,21 @@ async fn claim_names_the_action_it_took() {
     assert_eq!(h.get("x-trash-action").unwrap(), "trash");
     let h = claim_headers(ClaimQuery { dry_run: None, fs: None, action: Some("archive".into()) }).await;
     assert_eq!(h.get("x-trash-action").unwrap(), "archive");
+}
+
+#[tokio::test]
+#[serial]
+async fn once_claimed_keep_is_a_404_and_the_path_can_be_queued_again() {
+    let _dir = setup();
+    let a = due("/red/nas1/a", "alice", "/red/nas1");
+    save(_dir.path(), &[a.clone()]).unwrap();
+    assert_eq!(claim(Some("Bearer s3cret")).await.1, vec![a]);
+    assert!(load(_dir.path()).unwrap().is_empty(), "nothing is kept once claimed");
+    let alice = claims("alice", false, &[]);
+    let (code, body) = keep_full(&alice, "/red/nas1/a").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert!(body.contains("nightly run took it"), "{body}");
+    // The listing shows it until the next scan; queuing it again is allowed
+    // (the next run finds it gone and logs a skip).
+    assert_eq!(add_full(&alice, "/red/nas1/a", "alice").await.0, StatusCode::CREATED);
 }

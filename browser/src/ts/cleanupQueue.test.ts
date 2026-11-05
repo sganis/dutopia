@@ -3,9 +3,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TrashEntry } from './models';
 
-// In-memory stand-in for the server's queue.json and history.json.
+// In-memory stand-in for the server's queue.json.
 const server: TrashEntry[] = [];
-const history: any[] = [];
 const entry = (path: string, owner: string): TrashEntry =>
   ({ path, size: 10, owner, actor: owner, fs: '/red/nas1', queued_at: 1_000 });
 
@@ -22,7 +21,6 @@ vi.mock('$api', () => ({
       server.push(e);
       return e;
     }),
-    trashHistory: vi.fn(async () => history.slice()),
     trashKeep: vi.fn(async (path: string) => {
       const i = server.findIndex((e) => e.path === path);
       if (i < 0) throw new Error('not in the trash queue');
@@ -37,7 +35,6 @@ const q = await import('./cleanupQueue.svelte');
 
 beforeEach(async () => {
   server.length = 0;
-  history.length = 0;
   localStorage.clear();
   await q.loadCleanupQueue();
 });
@@ -126,11 +123,5 @@ describe('cleanupQueue extras', () => {
     expect((api.cleanupScript as any).mock.lastCall.slice(1)).toEqual(sent);
     expect((api.cleanupNotify as any).mock.lastCall.slice(1, 2)).toEqual(sent);
     expect(q.cleanupQueue.items.find((i) => i.path === '/red/nas1/a')?.status).toBe('queued');
-  });
-
-  it('loads what the nightly run did', async () => {
-    history.push({ ...entry('/red/nas1/old', 'bob'), status: 'moved', detail: '', dest: '/red/nas1/.trash/x', done_at: 5 });
-    await q.loadTrashHistory();
-    expect(q.cleanupQueue.history.map((h) => [h.path, h.status])).toEqual([['/red/nas1/old', 'moved']]);
   });
 });

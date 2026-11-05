@@ -241,26 +241,40 @@ def rmtree_fd(parent_fd, name):
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _tar(cwd_fd, archive, member, program, chdir=None):
+def _tar(cwd_fd, archive, member, program, chdir=None, owner=None):
     """Run tar inside cwd_fd: pack `member` (below `chdir`, when given) into
-    `archive` with `program`. A partial archive is removed when tar fails
-    (CalledProcessError)."""
-    cmd = ["tar", "--use-compress-program", program, "-cf", archive]
+    `archive` with `program`. It is written as `archive`.part, read back
+    whole (`program -t`), fsynced, given to `owner` (uid, gid: the dashboard
+    then counts it as theirs after the next scan) and only then renamed, so
+    a crash never leaves a truncated file under the final name. The .part
+    is removed when tar or the test fails (CalledProcessError)."""
+    part = archive + ".part"
+    cmd = ["tar", "--use-compress-program", program, "-cf", part]
     cmd += (["-C", chdir] if chdir else []) + [member]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True,
-                       preexec_fn=lambda: os.fchdir(cwd_fd), pass_fds=(cwd_fd,))
+        for c in (cmd, [program.split()[0], "-t", "-q", part]):
+            subprocess.run(c, check=True, capture_output=True, text=True,
+                           preexec_fn=lambda: os.fchdir(cwd_fd), pass_fds=(cwd_fd,))
     except subprocess.CalledProcessError:
-        if _exists(archive, cwd_fd):
-            os.unlink(archive, dir_fd=cwd_fd)
+        if _exists(part, cwd_fd):
+            os.unlink(part, dir_fd=cwd_fd)
         raise
-
-
-def compress(parent_fd, name, path):
-    """Pack folder `name` (below parent_fd) into <name>.tar.zst and remove
-    it; return the archive's path. tar runs inside parent_fd."""
+    fd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=cwd_fd)
     try:
-        _tar(parent_fd, name + ".tar.zst", name, "zstd -T0 -q")
+        os.fsync(fd)
+        if owner:
+            os.fchown(fd, *owner)
+    finally:
+        os.close(fd)
+    os.rename(part, archive, src_dir_fd=cwd_fd, dst_dir_fd=cwd_fd)
+
+
+def compress(parent_fd, name, path, owner=None):
+    """Pack folder `name` (below parent_fd) into <name>.tar.zst, owned by
+    `owner`, and remove it; return the archive's path. tar runs inside
+    parent_fd."""
+    try:
+        _tar(parent_fd, name + ".tar.zst", name, "zstd -T0 -q", owner=owner)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"tar failed, left uncompressed at {path}: {e.stderr.strip()}")
     rmtree_fd(parent_fd, name)
@@ -293,7 +307,7 @@ def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
             try:
                 moved = _rename_checked(t, dpfd, dname, dest)
                 if stat.S_ISDIR(moved.st_mode):
-                    return compress(dpfd, dname, dest)
+                    return compress(dpfd, dname, dest, (moved.st_uid, moved.st_gid))
                 return dest
             finally:
                 os.close(dpfd)
@@ -379,7 +393,8 @@ def _pack_into(t, dpfd, stage, dest):
             os.rmdir(stage, dir_fd=dpfd)
             raise
         try:
-            _tar(dpfd, stage + ".tar.gz", t.name, gzip_program(), chdir=stage)
+            _tar(dpfd, stage + ".tar.gz", t.name, gzip_program(), chdir=stage,
+                 owner=(t.st.st_uid, t.st.st_gid))
         except subprocess.CalledProcessError as e:
             why = e.stderr.strip()
             if _exists(t.name, t.pfd):

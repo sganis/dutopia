@@ -5,6 +5,11 @@ filesystems moves them to `<fs>/.trash/<date>/<path>` (folders as `.tar.zst`)
 and purges old trash. Keep works for 24h (`TRASH_UNDO_HOURS`); moved items stay
 30 days (`TRASH_KEEP_DAYS`). Upgrade duapi before the cron.
 
+Once the cron takes an item it leaves the queue; the cron logs what it did.
+After the next scan, `<fs>/.trash` and `<fs>/.archive` are browsed in the
+dashboard like any folder (packed folders and archives belong to the item's
+owner).
+
 Items sent to the archive wait the same 24h, then a second cron
 (`archive_mover.py`, see [Archive](#archive)) packs them into
 `<fs>/.archive/<path>.<date>.tar.gz` and keeps them.
@@ -45,8 +50,9 @@ MAILTO=storage-admins@corp.local
 ## If something goes wrong
 
 - **A run died halfway:** `... --batch /var/lib/dutopia-trash/<date>.json`
-- **Restore:** History shows where it went;
-  `tar --use-compress-program 'zstd -d' -xpf <fs>/.trash/<date>/a/b/run1.tar.zst -C <fs>/a/b`
+- **What happened to an item:** the log, one line per item (`ok`, `skip` or
+  `err`); the claimed batch is in `/var/lib/dutopia-trash/<date>.json`.
+- **Restore:** `tar --use-compress-program 'zstd -d' -xpf <fs>/.trash/<date>/a/b/run1.tar.zst -C <fs>/a/b`
 - **Free space now:** `... purge --keep-days 7`
 - **401:** the token file differs from the pod's `TRASH_TOKEN`.
 - **Private CA:** add `--cafile /path/to/ca.pem`.
@@ -71,8 +77,9 @@ MAILTO=storage-admins@corp.local
   (`.1`, `.2`… for a second one the same day). Uses `pigz` when installed,
   else gzip.
 - `.archive` is root-only. **Restore:** `cd <fs>/a/b && sudo tar -xpzf <fs>/.archive/a/b/run1.2026-11-05.tar.gz`
-- If tar fails (e.g. the filesystem is full) the item is put back and the
-  History tab shows the error.
+- If tar fails (e.g. the filesystem is full) or the archive does not read
+  back whole, the item is put back and the log says why. Archives are
+  written as `.part` and renamed only once complete.
 - **A run died halfway:** `... --batch /var/lib/dutopia-archive/<date>.json`;
   an item left in `<fs>/.archive/a/b/run1.<date>/` was not packed yet.
 

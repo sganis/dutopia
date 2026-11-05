@@ -78,6 +78,24 @@ class Archive(ArchiveFs):
             self.assertEqual(f.read(), b"hello")
         self.assertEqual(os.listdir(os.path.join(self.fs, ".archive/a")), [])
 
+    def test_an_archive_that_does_not_read_back_is_not_kept(self):
+        self.mk("a/run1/x.txt", b"hello")
+        # Compresses like gzip, but its integrity test (-t) fails.
+        prog = os.path.join(self.fs, "badgz")
+        with open(prog, "w") as f:
+            f.write('#!/bin/sh\n[ "$1" = "-t" ] && exit 1\nexec gzip "$@"\n')
+        os.chmod(prog, 0o755)
+        with mock.patch.object(fsops, "gzip_program", return_value=prog):
+            with self.assertRaisesRegex(RuntimeError, "put back"):
+                self.archive("a/run1")
+        self.assertTrue(os.path.isfile(os.path.join(self.fs, "a/run1/x.txt")))
+        self.assertEqual(os.listdir(os.path.join(self.fs, ".archive/a")), [])  # no .part left
+
+    def test_the_archive_belongs_to_the_item_owner(self):
+        self.mk("a/f")
+        st = os.stat(self.archive("a/f"))
+        self.assertEqual((st.st_uid, st.st_gid), (os.getuid(), os.getgid()))
+
 
 class Main(ArchiveFs):
     def setUp(self):
@@ -93,7 +111,7 @@ class Main(ArchiveFs):
         with mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok"}):
             return am.main(["--api", api.url, "--dev", "--state-dir", self.state, *args])
 
-    def test_claims_the_archive_and_reports(self):
+    def test_claims_the_archive(self):
         self.mk("p/dir/x")
         items = [self.item(self.fs + "/p/dir"), self.item(self.fs + "/p/gone")]
         with FakeApi(filesystems=[self.fs], items=items) as api:
@@ -101,25 +119,22 @@ class Main(ArchiveFs):
         (_, path, _, auth), = api.posts("/api/trash/claim")
         self.assertIn("action=archive", path)
         self.assertEqual(auth, "Bearer tok")
-        (_, _, body, _), = api.posts("/api/trash/report")
-        by_path = {o["path"]: o for o in body}
-        done = by_path[self.fs + "/p/dir"]
-        self.assertEqual(done["status"], "moved")
-        self.assertTrue(done["dest"].endswith(f"/.archive/p/dir.{datetime.date.today()}.tar.gz"))
-        self.assertEqual(by_path[self.fs + "/p/gone"]["status"], "skipped")
+        dest = os.path.join(self.fs, ".archive", "p", f"dir.{datetime.date.today()}.tar.gz")
+        self.assertTrue(os.path.isfile(dest))
+        self.assertFalse(os.path.exists(self.fs + "/p/dir"))
+        self.assertEqual([r for r in api.requests if r[0] == "POST" and "claim" not in r[1]], [])
 
     def test_older_server_is_refused_before_claiming(self):
         with FakeApi(filesystems=[self.fs], items=[self.item(self.mk("p/f"))], honor=False) as api:
             self.assertEqual(self._main(api), 1)
         self.assertEqual(api.posts("/api/trash/claim"), [])
 
-    def test_dry_run_changes_and_reports_nothing(self):
+    def test_dry_run_changes_nothing(self):
         p = self.mk("p/f")
         with FakeApi(filesystems=[self.fs], items=[self.item(p)]) as api:
             self.assertEqual(self._main(api, "--dry-run"), 0)
         self.assertIn("dry_run=1", api.posts("/api/trash/claim")[0][1])
         self.assertTrue(os.path.isfile(p))
-        self.assertEqual(api.posts("/api/trash/report"), [])
 
 
 if __name__ == "__main__":

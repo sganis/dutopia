@@ -32,7 +32,7 @@ mod oidc;
 mod query;
 mod shutdown;
 mod trash;
-mod trash_history;
+mod trash_claim;
 mod trash_store;
 
 use db::DbPool;
@@ -292,9 +292,7 @@ async fn main() -> Result<()> {
                 .post(trash::add_handler)
                 .delete(trash::keep_handler),
         )
-        .route("/trash/claim", post(trash_history::claim_handler))
-        .route("/trash/report", post(trash_history::report_handler))
-        .route("/trash/history", get(trash_history::history_handler))
+        .route("/trash/claim", post(trash_claim::claim_handler))
         .fallback(api_not_found);
 
     let frontend = ServeDir::new(&static_dir)

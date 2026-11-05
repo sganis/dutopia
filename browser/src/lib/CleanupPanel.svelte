@@ -15,8 +15,12 @@
     - User filter dropdown at the top. Admins see "All users" plus every
       owner currently in the queue. Non-admins only have their own username
       (the dropdown is disabled since there is nothing to pick).
-    - Totals on the right of the dropdown reflect the filtered set so the
-      admin can see per-user footprint before acting.
+    - A filter box next to it narrows the list by path (case-insensitive).
+    - Totals on the right reflect the filtered set so the admin can see
+      per-user footprint before acting.
+    - Only what is still queued is listed: once the nightly run takes an
+      item it leaves the queue; after the next scan it shows up in the
+      dashboard under `<fs>/.trash` or `<fs>/.archive`.
     - Download / Notify are enabled only when a specific user is selected
       (the endpoints are per-user). Selecting "All users" is for browsing
       the queue only.
@@ -27,12 +31,10 @@
   import {
     cleanupQueue,
     loadCleanupQueue,
-    loadTrashHistory,
     removeFromCleanupQueue,
     distinctOwners,
     filteredItems,
     trashItemsOf,
-    totalsFor,
     downloadScript,
     notifyUser,
   } from "../ts/cleanupQueue.svelte";
@@ -47,20 +49,19 @@
   } = $props();
 
   let selectedUser = $state<string | null>(null); // null == All users
+  let search = $state("");
   let working = $state(false);
 
-  /** "queued": the cart (Keep possible). "history": what the nightly run did. */
-  let tab = $state<"queued" | "history">("queued");
-  const owners = $derived(
-    tab === "queued"
-      ? distinctOwners()
-      : [...new Set(cleanupQueue.history.map((h) => h.owner))].sort(),
-  );
-  const historyItems = $derived(
-    cleanupQueue.history.filter((h) => !selectedUser || h.owner === selectedUser),
-  );
-  const items = $derived(filteredItems(selectedUser));
-  const totals = $derived(totalsFor(selectedUser));
+  const owners = $derived(distinctOwners());
+  const items = $derived.by(() => {
+    const needle = search.trim().toLowerCase();
+    const mine = filteredItems(selectedUser);
+    return needle ? mine.filter((i) => i.path.toLowerCase().includes(needle)) : mine;
+  });
+  const totals = $derived({
+    count: items.length,
+    size: items.reduce((sum, i) => sum + (i.size || 0), 0),
+  });
 
   // When the queue changes (e.g. adds from other parts of the app) make
   // sure a previously-selected owner that has been cleared doesn't leave
@@ -76,7 +77,6 @@
   $effect(() => {
     if (cleanupQueue.panelOpen) {
       loadCleanupQueue().catch((err) => onToast?.(err?.message ?? "Could not load the trash"));
-      loadTrashHistory().catch((err) => onToast?.(err?.message ?? "Could not load the trash history"));
     }
   });
 
@@ -93,7 +93,6 @@
     } catch (err: any) {
       onToast?.(err?.message ?? "Keep failed");
       await loadCleanupQueue().catch(() => {});
-      await loadTrashHistory().catch(() => {});
     } finally {
       working = false;
     }
@@ -135,10 +134,10 @@
   }
 
   const notifyDisabled = $derived(
-    tab !== "queued" || !State.isAdmin || !selectedUser || working || !api.smtpConfigured,
+    !State.isAdmin || !selectedUser || working || !api.smtpConfigured,
   );
   const downloadDisabled = $derived(
-    tab !== "queued" || !selectedUser || working || trashItemsOf(selectedUser).length === 0,
+    !selectedUser || working || trashItemsOf(selectedUser).length === 0,
   );
 </script>
 
@@ -172,31 +171,11 @@
         </button>
       </div>
 
-      <div class="flex gap-1 mb-3 text-sm" role="tablist">
-        <button
-          role="tab"
-          aria-selected={tab === "queued"}
-          class="px-3 py-1 rounded {tab === 'queued' ? 'bg-gray-600 text-gray-100' : 'text-gray-400 hover:bg-gray-700'}"
-          onclick={() => (tab = "queued")}
-        >
-          Queued ({cleanupQueue.items.length})
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "history"}
-          class="px-3 py-1 rounded {tab === 'history' ? 'bg-gray-600 text-gray-100' : 'text-gray-400 hover:bg-gray-700'}"
-          onclick={() => (tab = "history")}
-          title="What the nightly run did with items that left the queue"
-        >
-          History
-        </button>
-      </div>
-
       <div class="flex items-center gap-3 mb-3">
         <label class="text-sm text-gray-300" for="cleanup-user-filter">User:</label>
         <select
           id="cleanup-user-filter"
-          class="px-2 py-1 rounded border border-gray-500 bg-gray-900 text-gray-100 text-sm min-w-36 disabled:opacity-60"
+          class="h-10 px-2 rounded border border-gray-500 bg-gray-800 text-gray-100 text-sm min-w-36 disabled:opacity-60"
           bind:value={selectedUser}
           disabled={!State.isAdmin && owners.length <= 1}
         >
@@ -205,7 +184,14 @@
             <option value={owner}>{owner}</option>
           {/each}
         </select>
-        <div class="ml-auto text-sm text-gray-300" class:invisible={tab !== "queued"}>
+        <input
+          type="search"
+          class="flex-1 min-w-0 text-sm placeholder-gray-500"
+          placeholder="Filter by path"
+          aria-label="Filter by path"
+          bind:value={search}
+        />
+        <div class="text-sm text-gray-300 whitespace-nowrap">
           <span class="text-gray-100 font-medium">{totals.count}</span>
           item{totals.count === 1 ? "" : "s"}
           &nbsp;•&nbsp;
@@ -213,39 +199,6 @@
         </div>
       </div>
 
-      {#if tab === "history"}
-      <div class="flex flex-col gap-1 overflow-y-auto flex-1 border border-gray-700 rounded bg-gray-900/40 p-1">
-        {#each historyItems as h, i (h.path + h.done_at + i)}
-          <div class="p-2 rounded hover:bg-gray-700/40">
-            <div class="text-sm text-gray-100 truncate" title={h.path}>{h.path}</div>
-            <div class="text-xs text-gray-400">
-              {#if h.action === "archive"}
-                <span class="text-sky-300">archive</span>&nbsp;•&nbsp;
-              {/if}
-              {#if h.status === "moved"}
-                <span class="text-emerald-400">{h.action === "archive" ? "archived" : "moved"}</span>
-                {#if h.dest}&nbsp;to <span class="text-gray-300" title={h.dest}>{h.dest}</span>{/if}
-              {:else if h.status === "claimed"}
-                <span class="text-sky-400">being moved</span> by the nightly run
-              {:else if h.status === "kept"}
-                <span class="text-gray-300">kept</span>{#if h.detail}&nbsp;({h.detail}){/if}
-              {:else if h.status === "skipped"}
-                <span class="text-amber-400">skipped</span>: {h.detail}
-              {:else}
-                <span class="text-red-400">error</span>: {h.detail}
-              {/if}
-              &nbsp;•&nbsp; {fmtDate(h.done_at * 1000)}
-              &nbsp;•&nbsp; {humanBytes(h.size || 0)}
-              &nbsp;•&nbsp; <span class="text-gray-300">{h.owner}</span>
-            </div>
-          </div>
-        {:else}
-          <div class="text-sm text-gray-400 text-center py-8">
-            Nothing has left the queue yet. The nightly run lists here what it moved, archived or skipped.
-          </div>
-        {/each}
-      </div>
-      {:else}
       <div class="flex flex-col gap-1 overflow-y-auto flex-1 border border-gray-700 rounded bg-gray-900/40 p-1">
         {#each items as item (item.path)}
           <div class="flex items-center gap-2 p-2 rounded hover:bg-gray-700/40">
@@ -284,11 +237,14 @@
           </div>
         {:else}
           <div class="text-sm text-gray-400 text-center py-8">
-            Nothing queued. Click the trash or archive icon on files or single-owner folders to queue them.
+            {#if search.trim()}
+              Nothing queued matches "{search.trim()}".
+            {:else}
+              Nothing queued. Click the trash or archive icon on files or single-owner folders to queue them.
+            {/if}
           </div>
         {/each}
       </div>
-      {/if}
 
       <div class="flex justify-end items-center gap-2 mt-3">
         <button

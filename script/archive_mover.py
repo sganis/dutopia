@@ -6,8 +6,8 @@
 
 Claims the items queued for the archive over TRASH_UNDO_HOURS ago on the
 filesystems this node mounts, saves the batch, packs each into
-<fs>/.archive/<path>.<date>.tar.gz, removes the original and reports the
-results. Same checks as the trash (trash_fsops.py): items that are gone, not
+<fs>/.archive/<path>.<date>.tar.gz and removes the original, one log line
+per item. Same checks as the trash (trash_fsops.py): items that are gone, not
 their owner's, a folder holding other owners' files, or reached through a
 symlink are skipped. Archives are never purged. Restore one as root from its
 old folder: tar -xpzf <archive> (owners and modes are kept). Exit status 1
@@ -95,7 +95,7 @@ def claim_archive_items(args, token, allowed, today, check_mount):
 
 
 def work(args, token, today):
-    """Claim (or load --batch), archive, report; return the exit code."""
+    """Claim (or load --batch) and archive; return the exit code."""
     check_mount = not args.dev
     allowed = {f.rstrip("/") or "/" for f in args.fs} if args.fs else None
     if args.batch:
@@ -106,12 +106,9 @@ def work(args, token, today):
         if got is None:
             return 1
         items, errors = got
-    results = []
     errors += tm.run(items, today, args.state_dir, 0, [], check_mount=check_mount,
                      allowed_fs=allowed, min_uid=0 if args.dev else MIN_UID,
-                     dry_run=args.dry_run, results=results, do_purge=False, mover=archive_item)
-    if results and not args.dry_run and args.api and token:
-        errors += tm.report(args.api, token, results, args.cafile, args.allow_http)
+                     dry_run=args.dry_run, do_purge=False, mover=archive_item)
     return 1 if errors else 0
 
 

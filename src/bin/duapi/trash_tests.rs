@@ -1,6 +1,6 @@
 // rs/src/bin/duapi/trash_tests.rs
 use super::*;
-use crate::trash_history::{claim_handler, split_due, ClaimQuery};
+use crate::trash_claim::{claim_handler, split_due, ClaimQuery};
 use axum::body::to_bytes;
 use axum::http::{HeaderMap, HeaderValue};
 use serial_test::serial;

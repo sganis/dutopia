@@ -13,7 +13,7 @@
 
 import { SvelteMap } from "svelte/reactivity";
 import { api } from "$api";
-import type { TrashAction, TrashEntry, TrashOutcome } from "./models";
+import type { TrashAction, TrashEntry } from "./models";
 
 export type CleanupStatus = "queued" | "requesting" | "requested" | "error";
 
@@ -24,8 +24,6 @@ export type CleanupItem = TrashEntry & {
 
 export const cleanupQueue = $state({
   items: [] as CleanupItem[],
-  /** What the nightly run did with items that left the queue, newest first. */
-  history: [] as TrashOutcome[],
   panelOpen: false,
 });
 
@@ -47,11 +45,6 @@ function toItem(e: TrashEntry): CleanupItem {
 export async function loadCleanupQueue(): Promise<void> {
   const entries = await api.trashList();
   setItems(entries.map(toItem));
-}
-
-/** Replace the history with the server's (GET /api/trash/history). */
-export async function loadTrashHistory(): Promise<void> {
-  cleanupQueue.history = await api.trashHistory();
 }
 
 /** Queue an item on the server, then re-read the cart: a folder absorbs
@@ -110,13 +103,6 @@ export function filteredItems(owner: string | null): CleanupItem[] {
  *  Notify email are about (archived items are not to be deleted). */
 export function trashItemsOf(owner: string): CleanupItem[] {
   return filteredItems(owner).filter((i) => i.action !== "archive");
-}
-
-export function totalsFor(owner: string | null): { count: number; size: number } {
-  const items = filteredItems(owner);
-  let size = 0;
-  for (const i of items) size += i.size || 0;
-  return { count: items.length, size };
 }
 
 /** Download the server-generated Python script for a user's items. Marks
