@@ -3,11 +3,14 @@
 // The trash cart, kept on the server so the nightly cron can see it.
 //
 //   UI trash icon → POST   /api/trash          adds an entry to queue.json
+//   UI archive    → POST   /api/trash          the same, with action "archive"
 //   UI Keep       → DELETE /api/trash?path=    removes it (the 1-day undo)
 //   UI panel      → GET    /api/trash          entries the caller may manage
 //   cron 02:00    → POST   /api/trash/claim    (Bearer $TRASH_TOKEN) entries
-//                    queued over 24h ago, removed from the queue; the cron
-//                    moves them to <fs>/.trash/<date>/… and purges later.
+//                    queued over 24h ago, removed from the queue; the trash
+//                    cron moves them to <fs>/.trash/<date>/… and purges later,
+//                    the archive cron (?action=archive) packs them into
+//                    <fs>/.archive/<path>.<date>.tar.gz and keeps them.
 //
 // The queue is `$TRASH_DIR/queue.json` (default /data/trash, the PVC), one
 // JSON array guarded by a process-wide mutex and replaced by tmp + rename.
@@ -64,6 +67,43 @@ pub fn undo_hours() -> i64 {
 /// Bound on queue.json so a runaway client cannot grow it without limit.
 const MAX_ENTRIES: usize = 20_000;
 
+/// What the cron does with a queued item: move it to `<fs>/.trash` (purged
+/// after `keep_days`) or pack it into `<fs>/.archive` (kept). Entries saved
+/// before archiving existed have no action: they are trash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    #[default]
+    Trash,
+    Archive,
+}
+
+impl Action {
+    pub fn parse(s: &str) -> Option<Action> {
+        match s.trim() {
+            "trash" => Some(Action::Trash),
+            "archive" => Some(Action::Archive),
+            _ => None,
+        }
+    }
+
+    /// "trash" / "archive", for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Action::Trash => "trash",
+            Action::Archive => "archive",
+        }
+    }
+
+    /// The folder at the filesystem root the cron puts the item in.
+    pub fn dir(self) -> &'static str {
+        match self {
+            Action::Trash => ".trash",
+            Action::Archive => ".archive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub path: String,
@@ -76,6 +116,8 @@ pub struct Entry {
     pub fs: String,
     /// Unix seconds.
     pub queued_at: i64,
+    #[serde(default)]
+    pub action: Action,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +126,8 @@ pub struct AddReq {
     #[serde(default)]
     pub size: u64,
     pub owner: String,
+    #[serde(default)]
+    pub action: Action,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,19 +144,19 @@ pub fn can_manage(claims: &Claims, owner: &str, path: &str) -> bool {
         || owner == claims.sub
 }
 
-/// Check a normalized `path` can be trashed and return its filesystem: it
-/// must be inside a FILESYSTEMS entry, not the filesystem root itself, and
-/// not inside `<fs>/.trash` or `<fs>/.stats`.
+/// Check a normalized `path` can be trashed or archived and return its
+/// filesystem: it must be inside a FILESYSTEMS entry, not the filesystem
+/// root itself, and not inside `<fs>/.trash`, `.archive` or `.stats`.
 pub fn check_target(path: &str, filesystems: &[String]) -> Result<String, String> {
     let fs = fs_of(filesystems, path)
         .ok_or_else(|| format!("not inside a filesystem listed in FILESYSTEMS: {path}"))?;
     if path == fs {
-        return Err(format!("cannot trash a filesystem root: {path}"));
+        return Err(format!("cannot trash or archive a filesystem root: {path}"));
     }
-    for reserved in [".trash", ".stats"] {
+    for reserved in [".trash", ".archive", ".stats"] {
         let dir = if fs == "/" { format!("/{reserved}") } else { format!("{fs}/{reserved}") };
         if path_in_roots(std::slice::from_ref(&dir), path) {
-            return Err(format!("cannot trash inside {dir}"));
+            return Err(format!("cannot trash or archive inside {dir}"));
         }
     }
     Ok(fs.to_string())
@@ -191,8 +235,9 @@ pub async fn list_handler(claims: Claims) -> Response {
     }
 }
 
-/// POST /api/trash — queue `{path, size, owner}`. 201 with the new entry;
-/// 200 with the existing one when the path is already queued (the first
+/// POST /api/trash — queue `{path, size, owner, action?}` (action trash by
+/// default, or archive). 201 with the new entry; 200 with the existing one
+/// when the path is already queued for the same action (the first
 /// `queued_at` stands).
 pub async fn add_handler(claims: Claims, Json(req): Json<AddReq>) -> Response {
     let item = [PathItem { path: req.path.clone(), size: req.size }];
@@ -234,6 +279,7 @@ pub async fn add_handler(claims: Claims, Json(req): Json<AddReq>) -> Response {
         actor: claims.sub.clone(),
         fs,
         queued_at: Utc::now().timestamp(),
+        action: req.action,
     };
     let actor = claims.sub.clone();
     let built_at = crate::db_version().and_then(|v| v.parse::<i64>().ok());
@@ -264,12 +310,14 @@ pub async fn add_handler(claims: Claims, Json(req): Json<AddReq>) -> Response {
 }
 
 /// Put `entry` in the queue `q`. 200 with the existing entry when the path
-/// is already queued; 409 when it lies inside a queued folder, or when that
-/// entry is someone else's. Queued children of a new folder are absorbed
-/// into it (one move instead of several) when they have the same owner and
-/// filesystem; any other child is a 409 (absorbing it would drop someone
-/// else's request). Messages name a conflicting path only when the caller
-/// may manage it.
+/// is already queued for the same action; 201 when it was queued for the
+/// other one (trash ↔ archive): it switches, with a fresh undo window. 409
+/// when it lies inside a queued folder, or when that entry is someone
+/// else's. Queued children of a new folder are absorbed into it (one move
+/// instead of several) when they have the same owner, filesystem and action;
+/// any other child is a 409 (absorbing it would drop someone else's request,
+/// or trash what was to be archived). Messages name a conflicting path only
+/// when the caller may manage it.
 fn place(
     q: &mut Vec<Entry>,
     entry: Entry,
@@ -277,26 +325,32 @@ fn place(
 ) -> Result<(StatusCode, Entry), (StatusCode, String)> {
     let inside = |child: &str, parent: &str| path_in_roots(std::slice::from_ref(&parent.to_string()), child);
     let conflict = |msg: String| Err((StatusCode::CONFLICT, msg));
-    if let Some(e) = q.iter().find(|e| e.path == entry.path) {
-        return if can_manage(claims, &e.owner, &e.path) {
-            Ok((StatusCode::OK, e.clone()))
-        } else {
-            conflict("already queued by someone else".into())
-        };
+    if let Some(i) = q.iter().position(|e| e.path == entry.path) {
+        if !can_manage(claims, &q[i].owner, &q[i].path) {
+            return conflict("already queued by someone else".into());
+        }
+        if q[i].action == entry.action {
+            return Ok((StatusCode::OK, q[i].clone()));
+        }
+        q[i] = entry.clone();
+        return Ok((StatusCode::CREATED, entry));
     }
     if let Some(p) = q.iter().find(|e| inside(&entry.path, &e.path)) {
         return conflict(if can_manage(claims, &p.owner, &p.path) {
-            format!("already in the trash: inside queued {}", p.path)
+            format!("already queued for the {}: inside queued {}", p.action.name(), p.path)
         } else {
-            "a folder above it is already queued for the trash".into()
+            "a folder above it is already queued".into()
         });
     }
     let children: Vec<&Entry> = q.iter().filter(|e| inside(&e.path, &entry.path)).collect();
-    if let Some(c) = children.iter().find(|c| c.owner != entry.owner || c.fs != entry.fs) {
-        return conflict(if can_manage(claims, &c.owner, &c.path) {
-            format!("{} is queued for another owner or filesystem: keep it first", c.path)
-        } else {
+    let other = |c: &Entry| c.owner != entry.owner || c.fs != entry.fs || c.action != entry.action;
+    if let Some(c) = children.iter().find(|c| other(c)) {
+        return conflict(if !can_manage(claims, &c.owner, &c.path) {
             "something inside it is queued by someone else".into()
+        } else if c.action != entry.action {
+            format!("{} is queued for the {}: keep it first", c.path, c.action.name())
+        } else {
+            format!("{} is queued for another owner or filesystem: keep it first", c.path)
         });
     }
     if q.len() + 1 - children.len() > MAX_ENTRIES {

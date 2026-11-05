@@ -23,7 +23,8 @@
   import CleanupPanel from "../lib/CleanupPanel.svelte";
   import { scanStatus } from "../ts/scan.svelte";
   import { deleteQueue, addToQueue } from "../ts/deleteQueue.svelte";
-  import { cleanupQueue, toggleTrash, isQueued, loadCleanupQueue } from "../ts/cleanupQueue.svelte";
+  import { cleanupQueue, toggleTrash, queuedAction, loadCleanupQueue } from "../ts/cleanupQueue.svelte";
+  import type { TrashAction } from "../ts/models";
   import { canTrash, inRoot } from "../ts/trash";
 
   //#region types
@@ -633,16 +634,23 @@
       showToast(`Targeted for deletion (${deleteQueue.items.length})`);
       return;
     }
+    await queueWeb(p, size, owner, "trash");
+  }
+
+  /** Web build: queue for the trash or the archive (the archive cron packs
+   *  it into `<fs>/.archive`), or Keep when already queued for it. */
+  async function queueWeb(p: string, size: number, owner: string, action: TrashAction) {
     try {
-      const done = await toggleTrash(p, size, owner);
+      const done = await toggleTrash(p, size, owner, action);
       showToast(done === "kept"
-        ? "Kept: taken out of the trash"
-        : `Queued for trash (${cleanupQueue.items.length})`);
+        ? `Kept: taken out of the ${action} queue`
+        : `Queued for ${action} (${cleanupQueue.items.length})`);
     } catch (err: any) {
-      showToast(err?.message ?? "Trash request failed");
+      showToast(err?.message ?? `${action === "trash" ? "Trash" : "Archive"} request failed`);
       loadCleanupQueue().catch(() => {});
     }
   }
+  const archiveItem = (p: string, size: number, owner: string) => queueWeb(p, size, owner, "archive");
 
   /** Web build: the trash icon follows the server's rules — own items,
    *  any item for global admins or inside a storage admin's roots, and only
@@ -796,7 +804,7 @@
       <button
         class="btn relative"
         onclick={() => (cleanupQueue.panelOpen = true)}
-        title="Review trash"
+        title="Review trash and archive"
       >
         <div class="flex items-center gap-1">
           <span class="material-symbols-outlined">delete_sweep</span>
@@ -890,8 +898,9 @@
           onReveal={__DESKTOP__ ? revealPath : undefined}
           onTerminal={__DESKTOP__ ? openTerminal : undefined}
           onDelete={targetForDeletion}
+          onArchive={__DESKTOP__ ? undefined : archiveItem}
           canDelete={__DESKTOP__ ? undefined : canDeleteWeb}
-          queued={!__DESKTOP__ && isQueued(folder.path)}
+          queued={__DESKTOP__ ? null : queuedAction(folder.path)}
           onUserHover={showTip}
           onUserMove={moveTip}
           onUserLeave={hideTip}
@@ -910,8 +919,9 @@
           {userColors}
           onCopyPath={copyPath}
           onDelete={targetForDeletion}
+          onArchive={__DESKTOP__ ? undefined : archiveItem}
           canDelete={__DESKTOP__ ? undefined : canDeleteWeb}
-          queued={!__DESKTOP__ && isQueued(file.path)}
+          queued={__DESKTOP__ ? null : queuedAction(file.path)}
         />
       {/each}
 

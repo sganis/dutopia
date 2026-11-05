@@ -3,7 +3,8 @@
 // The cron side of the trash, and what it leaves behind.
 //
 //   POST /api/trash/claim   (Bearer $TRASH_TOKEN) due entries leave the queue
-//                           and are recorded as "claimed"
+//                           and are recorded as "claimed" (?action=archive:
+//                           the archive cron's entries; else the trash's)
 //   POST /api/trash/report  (Bearer $TRASH_TOKEN) the cron's result for each:
 //                           moved / skipped / error, superseding "claimed"
 //   GET  /api/trash/history what happened, as far as the caller may see
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use dutopia::auth::Claims;
 
-use crate::trash::{can_manage, undo_hours, Entry};
+use crate::trash::{can_manage, undo_hours, Action, Entry};
 use crate::trash_store::{with_both, Changed};
 
 /// Oldest outcomes are dropped past this many.
@@ -79,14 +80,14 @@ fn when(t: i64) -> String {
 /// The Keep answer for a path no longer queued, from its latest outcome.
 pub fn keep_too_late(latest: Option<&Outcome>) -> Response {
     let Some(o) = latest else {
-        return (StatusCode::NOT_FOUND, "not in the trash queue").into_response();
+        return (StatusCode::NOT_FOUND, "not queued").into_response();
     };
     let at = when(o.done_at);
     let msg = match o.status.as_str() {
         "claimed" => format!("too late to keep: the nightly run is moving it (since {at})"),
         "moved" => format!(
             "too late to keep: the nightly run moved it to {} on {at}",
-            o.dest.as_deref().unwrap_or("the trash")
+            o.dest.as_deref().unwrap_or(o.entry.action.dir())
         ),
         "skipped" => format!(
             "not queued any more: the nightly run left it in place on {at} ({})",
@@ -96,7 +97,7 @@ pub fn keep_too_late(latest: Option<&Outcome>) -> Response {
             "not queued any more: the nightly run failed on it on {at} ({}); it may still be in place",
             o.detail
         ),
-        _ => return (StatusCode::NOT_FOUND, format!("not in the trash queue (kept on {at})")).into_response(),
+        _ => return (StatusCode::NOT_FOUND, format!("not queued (kept on {at})")).into_response(),
     };
     (StatusCode::GONE, msg).into_response()
 }
@@ -108,9 +109,10 @@ pub fn readd_blocked(latest: Option<&Outcome>, db_built_at: Option<i64>) -> Opti
     match o.status.as_str() {
         "claimed" => Some(format!("the nightly run is moving it (since {})", when(o.done_at))),
         "moved" if db_built_at.is_none_or(|b| o.done_at > b) => Some(format!(
-            "already moved to the trash on {} ({}); the listing shows it until the next scan",
+            "already moved to the {} on {} ({}); the listing shows it until the next scan",
+            o.entry.action.name(),
             when(o.done_at),
-            o.dest.as_deref().unwrap_or("its .trash")
+            o.dest.as_deref().unwrap_or(o.entry.action.dir())
         )),
         _ => None,
     }
@@ -166,6 +168,10 @@ pub struct ClaimQuery {
     /// `?fs=/red/nas1,/red/nas2`: only entries of these filesystems (the
     /// ones the calling cron node mounts). Absent = every filesystem.
     pub fs: Option<String>,
+    /// `?action=archive`: the archive cron's entries. Absent = trash, so a
+    /// trash cron never takes what was queued for the archive.
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 /// POST /api/trash/claim — the due entries (queued over `undo_hours()` ago)
@@ -173,12 +179,22 @@ pub struct ClaimQuery {
 /// "claimed": from here on they belong to the cron. Due entries whose
 /// filesystem is no longer in FILESYSTEMS are retired as "skipped" (no node
 /// would ever take them). `?dry_run=1` returns the list and changes nothing.
+/// Only entries of `?action` (default trash) are claimed or retired.
 /// The reply confirms the options it applied (X-Trash-Dry-Run,
-/// X-Trash-Fs-Filter) so a newer cron can tell an older duapi ignored them.
+/// X-Trash-Fs-Filter, X-Trash-Action) so a newer cron can tell an older
+/// duapi ignored them.
 pub async fn claim_handler(headers: HeaderMap, Query(q): Query<ClaimQuery>) -> Response {
     if let Err(resp) = check_cron_token(&headers, "/api/trash/claim") {
         return resp;
     }
+    let action = match q.action.as_deref().map(Action::parse) {
+        None => Action::Trash,
+        Some(Some(a)) => a,
+        Some(None) => {
+            tracing::warn!(action = ?q.action, "400 POST /api/trash/claim: unknown action");
+            return (StatusCode::BAD_REQUEST, "unknown action (expected trash or archive)").into_response();
+        }
+    };
     let dry_run = matches!(q.dry_run.as_deref().map(str::trim), Some("1" | "true" | "yes" | "on"));
     let only_fs: Option<Vec<String>> = q.fs.as_deref().map(dutopia::filesystems::parse);
     let fs_filter = only_fs.is_some();
@@ -186,7 +202,7 @@ pub async fn claim_handler(headers: HeaderMap, Query(q): Query<ClaimQuery>) -> R
     let now = Utc::now().timestamp();
     let after_secs = undo_hours() * 60 * 60;
     let res = with_both(move |queue, history| {
-        let due = |e: &Entry| is_due(e, now, after_secs);
+        let due = |e: &Entry| e.action == action && is_due(e, now, after_secs);
         let wanted = |e: &Entry| only_fs.as_ref().is_none_or(|fss| fss.contains(&e.fs));
         let orphan = |e: &Entry| !listed.contains(&e.fs);
         let take: Vec<Entry> =
@@ -211,8 +227,9 @@ pub async fn claim_handler(headers: HeaderMap, Query(q): Query<ClaimQuery>) -> R
     .await;
     match res {
         Ok(due) => {
-            tracing::info!(items = due.len(), dry_run, "200 OK POST /api/trash/claim");
+            tracing::info!(items = due.len(), dry_run, action = action.name(), "200 OK POST /api/trash/claim");
             let mut resp = Json(due).into_response();
+            resp.headers_mut().insert("x-trash-action", HeaderValue::from_static(action.name()));
             if dry_run {
                 resp.headers_mut().insert("x-trash-dry-run", HeaderValue::from_static("1"));
             }

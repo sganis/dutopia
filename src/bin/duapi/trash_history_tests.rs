@@ -83,13 +83,13 @@ async fn claim_takes_only_the_requested_filesystems() {
     b.fs = "/red/nas2".into();
     save(dir.path(), &[a.clone(), b.clone()]).unwrap();
     // A cron node that mounts only nas2 must leave nas1's items queued.
-    let q = ClaimQuery { dry_run: None, fs: Some("/red/nas2/".into()) };
+    let q = ClaimQuery { dry_run: None, fs: Some("/red/nas2/".into()), action: None };
     let (status, got) = claim_q(Some("Bearer s3cret"), q).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, vec![b]);
     assert_eq!(load(dir.path()).unwrap(), vec![a.clone()]);
     // An empty list claims nothing.
-    let q = ClaimQuery { dry_run: None, fs: Some("".into()) };
+    let q = ClaimQuery { dry_run: None, fs: Some("".into()), action: None };
     assert!(claim_q(Some("Bearer s3cret"), q).await.1.is_empty());
     assert_eq!(load(dir.path()).unwrap(), vec![a]);
 }
@@ -165,7 +165,7 @@ fn trim_history_keeps_the_newest() {
 // ---- claim → claimed → report lifecycle (review 2) ----
 
 async fn add_full(c: &Claims, path: &str, owner: &str) -> (StatusCode, String) {
-    let req = AddReq { path: path.into(), size: 100, owner: owner.into() };
+    let req = AddReq { path: path.into(), size: 100, owner: owner.into(), action: Default::default() };
     let resp = add_handler(c.clone(), Json(req)).await;
     let status = resp.status();
     let body = to_bytes(resp.into_body(), LIMIT).await.unwrap();
@@ -198,7 +198,7 @@ async fn claim_with_root_filesystem() {
     let dir = setup();
     unsafe { std::env::set_var("FILESYSTEMS", "/") };
     save(dir.path(), &[due("/x/y", "alice", "/")]).unwrap();
-    let q = ClaimQuery { dry_run: None, fs: Some("/".into()) };
+    let q = ClaimQuery { dry_run: None, fs: Some("/".into()), action: None };
     assert_eq!(claim_q(Some("Bearer s3cret"), q).await.1.len(), 1);
 }
 
@@ -244,7 +244,7 @@ async fn claim_retires_entries_of_unlisted_filesystems() {
     let mine = due("/red/nas1/b", "alice", "/red/nas1");
     save(dir.path(), &[gone_fs.clone(), mine.clone()]).unwrap();
     // Even a node that only claims nas2 retires the orphan.
-    let q = ClaimQuery { dry_run: None, fs: Some("/red/nas2".into()) };
+    let q = ClaimQuery { dry_run: None, fs: Some("/red/nas2".into()), action: None };
     assert!(claim_q(Some("Bearer s3cret"), q).await.1.is_empty());
     assert_eq!(load(dir.path()).unwrap(), vec![mine]);
     let h = history(&claims("root", true, &[])).await;
@@ -256,10 +256,10 @@ async fn claim_retires_entries_of_unlisted_filesystems() {
 #[serial]
 async fn claim_confirms_the_options_it_applied() {
     let _dir = setup();
-    let h = claim_headers(ClaimQuery { dry_run: Some("1".into()), fs: Some("/red/nas1".into()) }).await;
+    let h = claim_headers(ClaimQuery { dry_run: Some("1".into()), fs: Some("/red/nas1".into()), action: None }).await;
     assert_eq!(h.get("x-trash-dry-run").unwrap(), "1");
     assert_eq!(h.get("x-trash-fs-filter").unwrap(), "1");
-    let h = claim_headers(ClaimQuery { dry_run: None, fs: None }).await;
+    let h = claim_headers(ClaimQuery { dry_run: None, fs: None, action: None }).await;
     assert!(h.get("x-trash-dry-run").is_none());
 }
 
@@ -309,4 +309,14 @@ async fn a_parent_absorbs_only_children_of_its_owner_and_filesystem() {
     // An admin may manage bob's child, but it is not alice's: refuse, keep it.
     assert_eq!(add(&claims("root", true, &[]), "/red/nas1/a", "alice").await, StatusCode::CONFLICT);
     assert_eq!(load(dir.path()).unwrap()[0].owner, "bob");
+}
+
+#[tokio::test]
+#[serial]
+async fn claim_names_the_action_it_took() {
+    let _dir = setup();
+    let h = claim_headers(ClaimQuery { dry_run: None, fs: None, action: None }).await;
+    assert_eq!(h.get("x-trash-action").unwrap(), "trash");
+    let h = claim_headers(ClaimQuery { dry_run: None, fs: None, action: Some("archive".into()) }).await;
+    assert_eq!(h.get("x-trash-action").unwrap(), "archive");
 }

@@ -30,6 +30,10 @@ use crate::get_users;
 ///
 /// `filesystems` is the `FILESYSTEMS` list: the SPA sends "up" from one of
 /// them to the home page and only offers the trash icon inside them.
+///
+/// `archive` tells `script/archive_mover.py` this duapi keeps archive
+/// requests apart (`?action=archive`): it refuses to claim from one that
+/// does not, which would hand it trash items.
 pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
@@ -38,6 +42,7 @@ pub async fn health_handler() -> impl IntoResponse {
         "filesystems": crate::filesystems(),
         "trash_undo_hours": crate::trash::undo_hours(),
         "trash_keep_days": crate::trash::keep_days(),
+        "archive": true,
     }))
 }
 

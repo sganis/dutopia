@@ -2,17 +2,18 @@
 //
 // Browser-build trash cart, kept on the server (GET/POST/DELETE /api/trash)
 // so the nightly cron can see it: an item queued here is moved to
-// `<fs>/.trash` once it has waited 24h. Keep (removeFromCleanupQueue) is the
-// undo for that day. The script/notify actions stay as extra ways to ask
-// the owner to clean up; they no longer empty the cart.
+// `<fs>/.trash` (or, queued for the archive, packed into `<fs>/.archive`)
+// once it has waited 24h. Keep (removeFromCleanupQueue) is the undo for that
+// day. The script/notify actions stay as extra ways to ask the owner to
+// clean up the trash items; they no longer empty the cart.
 //
 // Each item carries its owner so the panel can filter by user (same UX
 // pattern as the main app's user dropdown) and the script/notify endpoints
 // know which user to target.
 
-import { SvelteSet } from "svelte/reactivity";
+import { SvelteMap } from "svelte/reactivity";
 import { api } from "$api";
-import type { TrashEntry, TrashOutcome } from "./models";
+import type { TrashAction, TrashEntry, TrashOutcome } from "./models";
 
 export type CleanupStatus = "queued" | "requesting" | "requested" | "error";
 
@@ -28,18 +29,18 @@ export const cleanupQueue = $state({
   panelOpen: false,
 });
 
-/** Paths in the cart, for the per-row "in trash" check: a Set so a 2000-row
- *  listing does not scan a 20k-item admin cart once per row. */
-const queuedPaths = new SvelteSet<string>();
+/** Paths in the cart → their action, for the per-row "in trash" check: a
+ *  Map so a 2000-row listing does not scan a 20k-item admin cart per row. */
+const queuedPaths = new SvelteMap<string, TrashAction>();
 
 function setItems(items: CleanupItem[]) {
   cleanupQueue.items = items;
   queuedPaths.clear();
-  for (const i of items) queuedPaths.add(i.path);
+  for (const i of items) queuedPaths.set(i.path, i.action ?? "trash");
 }
 
 function toItem(e: TrashEntry): CleanupItem {
-  return { ...e, status: "queued" };
+  return { ...e, action: e.action ?? "trash", status: "queued" };
 }
 
 /** Replace the cart with the server's view of it. */
@@ -55,9 +56,11 @@ export async function loadTrashHistory(): Promise<void> {
 
 /** Queue an item on the server, then re-read the cart: a folder absorbs
  *  its queued children. Throws (cart unchanged) when refused. */
-export async function addToCleanupQueue(path: string, size: number, owner: string): Promise<void> {
+export async function addToCleanupQueue(
+  path: string, size: number, owner: string, action: TrashAction = "trash",
+): Promise<void> {
   if (!owner) return;
-  await api.trashAdd(path, size, owner);
+  await api.trashAdd(path, size, owner, action);
   await loadCleanupQueue();
 }
 
@@ -65,13 +68,21 @@ export function isQueued(path: string): boolean {
   return queuedPaths.has(path);
 }
 
-/** The row's trash icon: queue the item, or Keep it when already queued. */
-export async function toggleTrash(path: string, size: number, owner: string): Promise<"queued" | "kept"> {
-  if (isQueued(path)) {
+/** What `path` is queued for, or null. */
+export function queuedAction(path: string): TrashAction | null {
+  return queuedPaths.get(path) ?? null;
+}
+
+/** The row's trash or archive icon: queue the item for `action`, Keep it
+ *  when already queued for it, or switch it from the other action. */
+export async function toggleTrash(
+  path: string, size: number, owner: string, action: TrashAction = "trash",
+): Promise<"queued" | "kept"> {
+  if (queuedAction(path) === action) {
     await removeFromCleanupQueue(path);
     return "kept";
   }
-  await addToCleanupQueue(path, size, owner);
+  await addToCleanupQueue(path, size, owner, action);
   return "queued";
 }
 
@@ -95,6 +106,12 @@ export function filteredItems(owner: string | null): CleanupItem[] {
   return cleanupQueue.items.filter((i) => i.owner === owner);
 }
 
+/** The owner's items queued for the trash: what the cleanup script and the
+ *  Notify email are about (archived items are not to be deleted). */
+export function trashItemsOf(owner: string): CleanupItem[] {
+  return filteredItems(owner).filter((i) => i.action !== "archive");
+}
+
 export function totalsFor(owner: string | null): { count: number; size: number } {
   const items = filteredItems(owner);
   let size = 0;
@@ -105,7 +122,7 @@ export function totalsFor(owner: string | null): { count: number; size: number }
 /** Download the server-generated Python script for a user's items. Marks
  *  the group as "requested" on success; the items stay queued. */
 export async function downloadScript(owner: string): Promise<void> {
-  const items = filteredItems(owner);
+  const items = trashItemsOf(owner);
   if (items.length === 0) return;
   try {
     markGroup(owner, "requesting");
@@ -124,7 +141,7 @@ export async function downloadScript(owner: string): Promise<void> {
 /** Request the backend to email the owner. Admin only (enforced by the
  *  server). Marks the group as "requested"; the items stay queued. */
 export async function notifyUser(owner: string, message?: string): Promise<string> {
-  const items = filteredItems(owner);
+  const items = trashItemsOf(owner);
   if (items.length === 0) return "";
   try {
     markGroup(owner, "requesting");
@@ -143,7 +160,7 @@ export async function notifyUser(owner: string, message?: string): Promise<strin
 
 function markGroup(owner: string, status: CleanupStatus, error?: string) {
   for (const i of cleanupQueue.items) {
-    if (i.owner === owner) {
+    if (i.owner === owner && i.action !== "archive") {
       i.status = status;
       i.error = error;
     }

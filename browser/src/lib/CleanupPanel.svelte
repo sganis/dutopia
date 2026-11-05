@@ -1,6 +1,8 @@
 <!-- browser/src/lib/CleanupPanel.svelte -->
 <!--
-  Trash panel (web build only): the server-side trash cart.
+  Trash panel (web build only): the server-side trash cart, which also
+  holds the items queued for the archive (packed into `<fs>/.archive` as
+  .tar.gz by the archive cron, and kept).
 
   Layout mirrors DeletePanel: a centered modal with a scrollable list of
   items. What's different:
@@ -29,6 +31,7 @@
     removeFromCleanupQueue,
     distinctOwners,
     filteredItems,
+    trashItemsOf,
     totalsFor,
     downloadScript,
     notifyUser,
@@ -86,7 +89,7 @@
     working = true;
     try {
       await removeFromCleanupQueue(path);
-      onToast?.("Kept: removed from the trash");
+      onToast?.("Kept: taken out of the queue");
     } catch (err: any) {
       onToast?.(err?.message ?? "Keep failed");
       await loadCleanupQueue().catch(() => {});
@@ -134,7 +137,9 @@
   const notifyDisabled = $derived(
     tab !== "queued" || !State.isAdmin || !selectedUser || working || !api.smtpConfigured,
   );
-  const downloadDisabled = $derived(tab !== "queued" || !selectedUser || working || items.length === 0);
+  const downloadDisabled = $derived(
+    tab !== "queued" || !selectedUser || working || trashItemsOf(selectedUser).length === 0,
+  );
 </script>
 
 {#if cleanupQueue.panelOpen}
@@ -150,10 +155,11 @@
     >
       <div class="flex items-center justify-between mb-3 gap-4">
         <div>
-          <div class="text-lg font-semibold text-gray-100">Trash</div>
+          <div class="text-lg font-semibold text-gray-100">Trash &amp; archive</div>
           <div class="text-xs text-gray-400">
-            Items move to the filesystem's .trash {api.trashUndoHours}h after they
-            are queued and are purged after {api.trashKeepDays} days. Keep undoes it until then.
+            {api.trashUndoHours}h after they are queued, trashed items move to the filesystem's
+            .trash and are purged after {api.trashKeepDays} days; archived items are packed into
+            its .archive as .tar.gz and kept. Keep undoes it until then.
           </div>
         </div>
         <button
@@ -213,8 +219,11 @@
           <div class="p-2 rounded hover:bg-gray-700/40">
             <div class="text-sm text-gray-100 truncate" title={h.path}>{h.path}</div>
             <div class="text-xs text-gray-400">
+              {#if h.action === "archive"}
+                <span class="text-sky-300">archive</span>&nbsp;•&nbsp;
+              {/if}
               {#if h.status === "moved"}
-                <span class="text-emerald-400">moved</span>
+                <span class="text-emerald-400">{h.action === "archive" ? "archived" : "moved"}</span>
                 {#if h.dest}&nbsp;to <span class="text-gray-300" title={h.dest}>{h.dest}</span>{/if}
               {:else if h.status === "claimed"}
                 <span class="text-sky-400">being moved</span> by the nightly run
@@ -232,7 +241,7 @@
           </div>
         {:else}
           <div class="text-sm text-gray-400 text-center py-8">
-            Nothing has left the queue yet. The nightly run lists here what it moved or skipped.
+            Nothing has left the queue yet. The nightly run lists here what it moved, archived or skipped.
           </div>
         {/each}
       </div>
@@ -248,7 +257,8 @@
                 {#if item.actor && item.actor !== item.owner}
                   &nbsp;(queued by {item.actor})
                 {/if}
-                &nbsp;•&nbsp; trash after {fmtDate(trashAfter(item.queued_at, api.trashUndoHours))}
+                &nbsp;•&nbsp; <span class:text-sky-300={item.action === "archive"}>{item.action ?? "trash"}</span>
+                after {fmtDate(trashAfter(item.queued_at, api.trashUndoHours))}
                 {#if item.status === "error" && item.error}
                   &nbsp;•&nbsp; <span class="text-red-400" title={item.error}>{item.error}</span>
                 {/if}
@@ -267,14 +277,14 @@
               class="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-100 text-xs disabled:opacity-50"
               onclick={() => clickKeep(item.path)}
               disabled={working}
-              title="Take it out of the trash"
+              title="Take it out of the queue"
             >
               Keep
             </button>
           </div>
         {:else}
           <div class="text-sm text-gray-400 text-center py-8">
-            Trash is empty. Click the delete icon on files or single-owner folders to queue them.
+            Nothing queued. Click the trash or archive icon on files or single-owner folders to queue them.
           </div>
         {/each}
       </div>
@@ -285,7 +295,7 @@
           class="btn inline-flex items-center gap-1"
           onclick={clickDownload}
           disabled={downloadDisabled}
-          title={selectedUser ? "Download a Python cleanup script for this user" : "Pick a user first"}
+          title={selectedUser ? "Download a Python cleanup script for this user's trash items" : "Pick a user first"}
         >
           <span class="material-symbols-outlined text-base leading-none">download</span>
           <span>Cleanup script</span>
@@ -298,7 +308,7 @@
             title={!api.smtpConfigured
               ? "SMTP not configured on the server"
               : selectedUser
-                ? "Email this user with the path list"
+                ? "Email this user the list of their trash items"
                 : "Pick a user first"}
           >
             <span class="material-symbols-outlined text-base leading-none">mail</span>

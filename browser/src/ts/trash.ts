@@ -31,7 +31,7 @@ export function fsOf(filesystems: string[], path: string): string | null {
   return best;
 }
 
-/** May `viewer` trash the item `path` owned by `owner`? */
+/** May `viewer` trash (or archive: same rules) the item `path` owned by `owner`? */
 export function canTrash(viewer: TrashViewer, path: string, owner: string | null): boolean {
   // UNK = a UID with no account (dusum/dudb): the cron cannot check it.
   if (!owner || owner === "UNK") return false;
@@ -39,7 +39,7 @@ export function canTrash(viewer: TrashViewer, path: string, owner: string | null
   const fs = fsOf(viewer.filesystems, p);
   if (fs === null || p === fs.replace(/\/+$/, "")) return false;
   const base = fs === "/" ? "" : fs;
-  if (inRoot(`${base}/.trash`, p) || inRoot(`${base}/.stats`, p)) return false;
+  if ([".trash", ".archive", ".stats"].some((d) => inRoot(`${base}/${d}`, p))) return false;
   return viewer.isAdmin
     || viewer.roots.some((r) => inRoot(r, p))
     || owner === viewer.username;

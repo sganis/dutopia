@@ -3,6 +3,7 @@
   import type { SvelteMap } from "svelte/reactivity";
   import { humanBytes, humanCount, humanTime, isWindows } from "../ts/util";
   import ActionBar from "./ActionBar.svelte";
+  import type { TrashAction } from "../ts/models";
 
   type UserStatsJson = {
     username: string;
@@ -37,8 +38,9 @@
     onReveal,
     onTerminal,
     onDelete,
+    onArchive,
     canDelete,
-    queued = false,
+    queued = null,
     onUserHover,
     onUserMove,
     onUserLeave,
@@ -55,11 +57,13 @@
      *  folder has exactly one owner (web build requires single-owner folders
      *  for cleanup requests). Desktop passes whatever owner — it ignores it. */
     onDelete?: (path: string, size: number, owner: string) => void;
-    /** Extra gate on the trash icon (web: the trash tiers + FILESYSTEMS).
-     *  Unset = shown for every single-owner folder. */
+    /** The archive icon (web only); same arguments and gate as onDelete. */
+    onArchive?: (path: string, size: number, owner: string) => void;
+    /** Extra gate on the trash and archive icons (web: the trash tiers +
+     *  FILESYSTEMS). Unset = shown for every single-owner folder. */
     canDelete?: (path: string, owner: string) => boolean;
-    /** Already in the trash cart: the trash icon shows it and toggles Keep. */
-    queued?: boolean;
+    /** Already in the cart: that icon shows it and toggles Keep. */
+    queued?: TrashAction | null;
     onUserHover?: (e: MouseEvent, userData: UserStatsJson, percent: number) => void;
     onUserMove?: (e: MouseEvent) => void;
     onUserLeave?: () => void;
@@ -126,6 +130,7 @@
     const keys = Object.keys(folder.users ?? {});
     return keys.length === 1 ? keys[0] : null;
   });
+  const allowed = $derived(!!singleOwner && (canDelete?.(folder.path, singleOwner) ?? true));
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -164,10 +169,10 @@
         onCopy={onCopyPath ? () => onCopyPath(folder.path) : undefined}
         onReveal={onReveal ? () => onReveal(folder.path) : undefined}
         onTerminal={onTerminal ? () => onTerminal(folder.path) : undefined}
-        onDelete={onDelete && singleOwner && (canDelete?.(folder.path, singleOwner) ?? true)
-          ? () => onDelete(folder.path, toNum(folder.total_disk), singleOwner!)
-          : undefined}
-        deleteActive={queued}
+        onDelete={onDelete && allowed ? () => onDelete(folder.path, toNum(folder.total_disk), singleOwner!) : undefined}
+        deleteActive={queued === "trash"}
+        onArchive={onArchive && allowed ? () => onArchive(folder.path, toNum(folder.total_disk), singleOwner!) : undefined}
+        archiveActive={queued === "archive"}
       />
       <p class="text-sm text-right">
         {bottomValueFolder(folder)}

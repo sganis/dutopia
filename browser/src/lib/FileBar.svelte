@@ -3,6 +3,7 @@
   import type { SvelteMap } from "svelte/reactivity";
   import { humanBytes, humanTime } from "../ts/util";
   import ActionBar from "./ActionBar.svelte";
+  import type { TrashAction } from "../ts/models";
 
   type ScannedFile = {
     path: string;
@@ -21,8 +22,9 @@
     userColors,
     onCopyPath,
     onDelete,
+    onArchive,
     canDelete,
-    queued = false,
+    queued = null,
   }: {
     file: ScannedFile;
     sortBy: SortKey;
@@ -30,10 +32,12 @@
     userColors: SvelteMap<string, string>;
     onCopyPath?: (path: string) => void;
     onDelete?: (path: string, size: number, owner: string) => void;
-    /** Extra gate on the trash icon (web: the trash tiers + FILESYSTEMS). */
+    /** The archive icon (web only); same arguments and gate as onDelete. */
+    onArchive?: (path: string, size: number, owner: string) => void;
+    /** Extra gate on the trash and archive icons (web: the trash tiers + FILESYSTEMS). */
     canDelete?: (path: string, owner: string) => boolean;
-    /** Already in the trash cart: the trash icon shows it and toggles Keep. */
-    queued?: boolean;
+    /** Already in the cart: that icon shows it and toggles Keep. */
+    queued?: TrashAction | null;
   } = $props();
 
   const toNum = (v: any) => {
@@ -52,6 +56,7 @@
   }
 
   const color = $derived(userColors.get(file.owner));
+  const allowed = $derived(canDelete?.(file.path, file.owner) ?? true);
 </script>
 
 <div class="flex">
@@ -75,8 +80,10 @@
         <div class="flex items-center gap-2 min-w-0">
           <ActionBar
             onCopy={onCopyPath ? () => onCopyPath(file.path) : undefined}
-            onDelete={onDelete && (canDelete?.(file.path, file.owner) ?? true) ? () => onDelete(file.path, toNum(file.size), file.owner) : undefined}
-            deleteActive={queued}
+            onDelete={onDelete && allowed ? () => onDelete(file.path, toNum(file.size), file.owner) : undefined}
+            deleteActive={queued === "trash"}
+            onArchive={onArchive && allowed ? () => onArchive(file.path, toNum(file.size), file.owner) : undefined}
+            archiveActive={queued === "archive"}
           />
           <span class="truncate">{file.owner}</span>
         </div>

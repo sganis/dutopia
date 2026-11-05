@@ -2,7 +2,7 @@
 import { State, API_URL } from "./store.svelte";
 import { fetchCached, initDbVersion } from './cache.js';
 import { filesResultFrom } from "./transform";
-import type { FilesResult, ScannedFile, TrashEntry, TrashOutcome } from "./models";
+import type { FilesResult, ScannedFile, TrashAction, TrashEntry, TrashOutcome } from "./models";
 
 type AgeMini = { count: number; size: number; disk: number; mtime: number };
 export type RawFolder = { path: string; users: Record<string, Record<'0'|'1'|'2', AgeMini>> };
@@ -202,9 +202,10 @@ class Api {
     return this.trashFetch<TrashEntry[]>("trash", "GET");
   }
 
-  /** POST /api/trash: queue an item; returns the stored entry. */
-  async trashAdd(path: string, size: number, owner: string): Promise<TrashEntry> {
-    return this.trashFetch<TrashEntry>("trash", "POST", { path, size, owner });
+  /** POST /api/trash: queue an item for the trash or the archive; returns
+   *  the stored entry. Queuing it for the other action switches it. */
+  async trashAdd(path: string, size: number, owner: string, action: TrashAction = "trash"): Promise<TrashEntry> {
+    return this.trashFetch<TrashEntry>("trash", "POST", { path, size, owner, action });
   }
 
   /** GET /api/trash/history: what the nightly run did, newest first. */

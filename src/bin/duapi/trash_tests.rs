@@ -29,6 +29,7 @@ pub(crate) fn entry(path: &str, owner: &str, queued_at: i64) -> Entry {
         actor: owner.into(),
         fs: "/red/nas1".into(),
         queued_at,
+        action: Action::Trash,
     }
 }
 
@@ -65,7 +66,11 @@ pub(crate) fn setup() -> Env {
 }
 
 pub(crate) async fn add(c: &Claims, path: &str, owner: &str) -> StatusCode {
-    let req = AddReq { path: path.into(), size: 100, owner: owner.into() };
+    add_as(c, path, owner, Action::Trash).await
+}
+
+pub(crate) async fn add_as(c: &Claims, path: &str, owner: &str, action: Action) -> StatusCode {
+    let req = AddReq { path: path.into(), size: 100, owner: owner.into(), action };
     add_handler(c.clone(), Json(req)).await.status()
 }
 
@@ -85,7 +90,7 @@ pub(crate) async fn claim(auth: Option<&str>) -> (StatusCode, Vec<Entry>) {
 }
 
 pub(crate) async fn claim_with(auth: Option<&str>, dry_run: Option<&str>) -> (StatusCode, Vec<Entry>) {
-    claim_q(auth, ClaimQuery { dry_run: dry_run.map(Into::into), fs: None }).await
+    claim_q(auth, ClaimQuery { dry_run: dry_run.map(Into::into), fs: None, action: None }).await
 }
 
 pub(crate) async fn claim_q(auth: Option<&str>, q: ClaimQuery) -> (StatusCode, Vec<Entry>) {
@@ -375,4 +380,70 @@ async fn add_of_a_parent_over_someone_elses_child_is_a_conflict() {
     let alice = claims("alice", false, &[]);
     assert_eq!(add(&alice, "/red/nas1/a", "alice").await, StatusCode::CONFLICT);
     assert_eq!(load(dir.path()).unwrap()[0].owner, "bob");
+}
+
+// ---- archive: the same queue, with action "archive" ----
+
+fn archived(path: &str, owner: &str, queued_at: i64) -> Entry {
+    Entry { action: Action::Archive, ..entry(path, owner, queued_at) }
+}
+
+#[test]
+fn entries_saved_before_archiving_are_trash() {
+    let old = r#"[{"path":"/red/nas1/a","size":1,"owner":"alice","actor":"alice","fs":"/red/nas1","queued_at":1}]"#;
+    let q: Vec<Entry> = serde_json::from_str(old).unwrap();
+    assert_eq!(q[0].action, Action::Trash);
+    let json = serde_json::to_string(&archived("/red/nas1/a", "alice", 1)).unwrap();
+    assert!(json.contains(r#""action":"archive""#), "{json}");
+}
+
+#[test]
+fn check_target_rejects_the_archive_folder() {
+    assert!(check_target("/red/nas1/.archive", &fss()).is_err());
+    assert!(check_target("/red/nas1/.archive/a/b.tar.gz", &fss()).is_err());
+    assert!(check_target("/red/nas1/.archived", &fss()).is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn add_archive_then_switch_to_trash_and_back() {
+    let dir = setup();
+    save(dir.path(), &[archived("/red/nas1/a", "alice", 7)]).unwrap();
+    let alice = claims("alice", false, &[]);
+    // Same action: idempotent, the first timestamp stands.
+    assert_eq!(add_as(&alice, "/red/nas1/a", "alice", Action::Archive).await, StatusCode::OK);
+    assert_eq!(load(dir.path()).unwrap()[0].queued_at, 7);
+    // The other button switches it, with a fresh undo window.
+    assert_eq!(add(&alice, "/red/nas1/a", "alice").await, StatusCode::CREATED);
+    let q = load(dir.path()).unwrap();
+    assert_eq!((q.len(), q[0].action), (1, Action::Trash));
+    assert!(q[0].queued_at > 7);
+    assert_eq!(add_as(&alice, "/red/nas1/a", "alice", Action::Archive).await, StatusCode::CREATED);
+    assert_eq!(load(dir.path()).unwrap()[0].action, Action::Archive);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_parent_does_not_absorb_a_child_queued_for_the_other_action() {
+    let dir = setup();
+    save(dir.path(), &[entry("/red/nas1/a/b", "alice", 1)]).unwrap();
+    let alice = claims("alice", false, &[]);
+    assert_eq!(add_as(&alice, "/red/nas1/a", "alice", Action::Archive).await, StatusCode::CONFLICT);
+    assert_eq!(load(dir.path()).unwrap(), vec![entry("/red/nas1/a/b", "alice", 1)]);
+    assert_eq!(add_as(&alice, "/red/nas1/a/b/c", "alice", Action::Archive).await, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+#[serial]
+async fn claim_keeps_trash_and_archive_apart() {
+    let dir = setup();
+    let (t, a) = (entry("/red/nas1/t", "alice", 1), archived("/red/nas1/a", "alice", 1));
+    save(dir.path(), &[t.clone(), a.clone()]).unwrap();
+    let q = |action: Option<&str>| ClaimQuery { dry_run: None, fs: None, action: action.map(Into::into) };
+    assert_eq!(claim_q(Some("Bearer s3cret"), q(Some("nope"))).await.0, StatusCode::BAD_REQUEST);
+    // No action: the trash cron, as before archiving existed.
+    assert_eq!(claim_q(Some("Bearer s3cret"), q(None)).await, (StatusCode::OK, vec![t]));
+    assert_eq!(load(dir.path()).unwrap(), vec![a.clone()]);
+    assert_eq!(claim_q(Some("Bearer s3cret"), q(Some("archive"))).await, (StatusCode::OK, vec![a]));
+    assert!(load(dir.path()).unwrap().is_empty());
 }

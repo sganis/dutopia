@@ -50,7 +50,8 @@ class FakeApi:
 
             def do_GET(self):
                 api.requests.append(("GET", self.path, None, self.headers.get("Authorization")))
-                health = {"filesystems": api.filesystems}
+                # An older duapi (honor=False) has no archive queue either.
+                health = {"filesystems": api.filesystems, "archive": api.honor}
                 if api.keep_days is not None:
                     health["trash_keep_days"] = api.keep_days
                 self._reply(health)

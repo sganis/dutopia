@@ -71,6 +71,10 @@ export type TrashOutcome = TrashEntry & {
   done_at: number;
 };
 
+/** What the cron does with a queued item: move it to `<fs>/.trash`, or pack
+ *  it into `<fs>/.archive` as .tar.gz. */
+export type TrashAction = "trash" | "archive";
+
 /** One queued item of the server-side trash (src/bin/duapi/trash.rs). */
 export type TrashEntry = {
   path: string;
@@ -80,4 +84,6 @@ export type TrashEntry = {
   fs: string;
   /** Unix seconds. */
   queued_at: number;
+  /** Missing from an older duapi: trash. */
+  action?: TrashAction;
 };

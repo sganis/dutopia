@@ -1,9 +1,13 @@
-# Trash mover
+# Trash and archive movers
 
 The web UI only queues items. A root cron on a node that mounts the
 filesystems moves them to `<fs>/.trash/<date>/<path>` (folders as `.tar.zst`)
 and purges old trash. Keep works for 24h (`TRASH_UNDO_HOURS`); moved items stay
 30 days (`TRASH_KEEP_DAYS`). Upgrade duapi before the cron.
+
+Items sent to the archive wait the same 24h, then a second cron
+(`archive_mover.py`, see [Archive](#archive)) packs them into
+`<fs>/.archive/<path>.<date>.tar.gz` and keeps them.
 
 ## Install (on the node)
 
@@ -12,6 +16,7 @@ paths as `FILESYSTEMS`, without root squash.
 
 ```bash
 sudo install -D -m 0755 script/trash_mover.py /opt/dutopia/trash_mover.py
+sudo install -D -m 0755 script/archive_mover.py /opt/dutopia/archive_mover.py
 sudo install -D -m 0644 script/trash_fsops.py /opt/dutopia/trash_fsops.py
 sudo install -D -m 0600 trash.token /etc/dutopia/trash.token   # the Secret's TRASH_TOKEN
 ```
@@ -46,10 +51,36 @@ MAILTO=storage-admins@corp.local
 - **401:** the token file differs from the pod's `TRASH_TOKEN`.
 - **Private CA:** add `--cafile /path/to/ca.pem`.
 
+## Archive
+
+Same flags and token as the trash mover; no purge (archives are kept).
+
+```bash
+sudo python3 /opt/dutopia/archive_mover.py $T --dry-run   # look first
+sudo python3 /opt/dutopia/archive_mover.py $T             # archive
+```
+
+`/etc/cron.d/dutopia-archive`:
+
+```cron
+MAILTO=storage-admins@corp.local
+30 2 * * * root python3 /opt/dutopia/archive_mover.py --api https://dutopia.apps.ocp.corp.local --token-file /etc/dutopia/trash.token --fs /red/nas1 --fs /red/nas2 >> /var/log/dutopia-archive.log 2>&1 || echo "archive mover failed, see /var/log/dutopia-archive.log"
+```
+
+- Files and folders alike become `<fs>/.archive/a/b/run1.2026-11-05.tar.gz`
+  (`.1`, `.2`… for a second one the same day). Uses `pigz` when installed,
+  else gzip.
+- `.archive` is root-only. **Restore:** `cd <fs>/a/b && sudo tar -xpzf <fs>/.archive/a/b/run1.2026-11-05.tar.gz`
+- If tar fails (e.g. the filesystem is full) the item is put back and the
+  History tab shows the error.
+- **A run died halfway:** `... --batch /var/lib/dutopia-archive/<date>.json`;
+  an item left in `<fs>/.archive/a/b/run1.<date>/` was not packed yet.
+
 ## Local test
 
 ```bash
 TRASH_TOKEN=x python3 script/trash_mover.py --dev --api http://localhost:18088
+TRASH_TOKEN=x python3 script/archive_mover.py --dev --api http://localhost:18088
 ```
 
 with duapi started with `FILESYSTEMS=<dirs> TRASH_TOKEN=x TRASH_UNDO_HOURS=0`.

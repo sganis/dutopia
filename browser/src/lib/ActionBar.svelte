@@ -14,6 +14,8 @@
     onTerminal,
     onDelete,
     deleteActive = false,
+    onArchive,
+    archiveActive = false,
   }: {
     onCopy?: () => void;
     onReveal?: () => void;
@@ -22,6 +24,9 @@
     /** The item is already queued for the trash: the icon stays lit and a
      *  click takes it back out (Keep). */
     deleteActive?: boolean;
+    onArchive?: () => void;
+    /** The item is already queued for the archive: same as deleteActive. */
+    archiveActive?: boolean;
   } = $props();
 
   function handle(e: MouseEvent, fn?: () => void) {
@@ -71,13 +76,27 @@
       type="button"
       class="action-btn action-btn-danger"
       class:action-btn-active={deleteActive}
-      title={deleteActive ? "Queued for the trash: click to keep it" : "Target for deletion"}
-      aria-label={deleteActive ? "Keep (take out of the trash)" : "Target for deletion"}
+      title={deleteActive ? "Queued for the trash: click to keep it" : "Send to trash"}
+      aria-label={deleteActive ? "Keep (take out of the trash)" : "Send to trash"}
       aria-pressed={deleteActive}
       onclick={(e) => handle(e, onDelete)}
     >
       <span class="material-symbols-outlined">{deleteActive ? "delete_forever" : "delete"}</span>
       {#if deleteActive}<span class="action-label">in trash · keep</span>{/if}
+    </button>
+  {/if}
+  {#if onArchive}
+    <button
+      type="button"
+      class="action-btn"
+      class:action-btn-active={archiveActive}
+      title={archiveActive ? "Queued for the archive: click to keep it" : "Send to archive"}
+      aria-label={archiveActive ? "Keep (take out of the archive queue)" : "Send to archive"}
+      aria-pressed={archiveActive}
+      onclick={(e) => handle(e, onArchive)}
+    >
+      <span class="material-symbols-outlined">archive</span>
+      {#if archiveActive}<span class="action-label">in archive · keep</span>{/if}
     </button>
   {/if}
 </div>

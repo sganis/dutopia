@@ -183,7 +183,7 @@ async fn trash_deadlines(owner: &str) -> HashMap<String, i64> {
     match res {
         Ok(Ok(queue)) => queue
             .into_iter()
-            .filter(|e| e.owner == owner && listed.contains(&e.fs))
+            .filter(|e| e.owner == owner && e.action == crate::trash::Action::Trash && listed.contains(&e.fs))
             .map(|e| (e.path, e.queued_at + after))
             .collect(),
         Ok(Err(e)) => {
@@ -515,9 +515,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let e = |path: &str, fs: &str| crate::trash::Entry {
             path: path.into(), size: 1, owner: "alice".into(), actor: "alice".into(),
-            fs: fs.into(), queued_at: 100,
+            fs: fs.into(), queued_at: 100, action: crate::trash::Action::Trash,
         };
-        crate::trash::save(dir.path(), &[e("/red/nas1/a", "/red/nas1"), e("/red/old/b", "/red/old")]).unwrap();
+        let mut archived = e("/red/nas1/c", "/red/nas1");
+        archived.action = crate::trash::Action::Archive;
+        crate::trash::save(dir.path(), &[e("/red/nas1/a", "/red/nas1"), e("/red/old/b", "/red/old"), archived])
+            .unwrap();
         unsafe {
             std::env::set_var("TRASH_DIR", dir.path());
             std::env::set_var("FILESYSTEMS", "/red/nas1");
@@ -529,6 +532,7 @@ mod tests {
         }
         assert!(d.contains_key("/red/nas1/a"));
         assert!(!d.contains_key("/red/old/b"), "no node will move it: no date to promise");
+        assert!(!d.contains_key("/red/nas1/c"), "archived, not trashed");
     }
 
     #[test]

@@ -69,17 +69,20 @@ def api_health(api, cafile=None, allow_http=False):
 
 
 def claim(api, token, cafile=None, timeout=120, allow_http=False, dry_run=False,
-          filesystems=None, confirmations=None):
+          filesystems=None, confirmations=None, action=None):
     """POST /api/trash/claim; returns the claimed items (a list). Only items
     of `filesystems` when given (the ones this node mounts: the rest stays
     queued for another node). dry_run asks for the same list without
-    removing it from the queue. `confirmations` (a dict) gets whether the
-    server applied each option: an older duapi ignores both."""
+    removing it from the queue. `action` "archive" asks for the archive's
+    items (default: the trash's). `confirmations` (a dict) gets whether the
+    server applied each option: an older duapi ignores them."""
     params = {}
     if dry_run:
         params["dry_run"] = "1"
     if filesystems is not None:
         params["fs"] = ",".join(filesystems)
+    if action:
+        params["action"] = action
     endpoint = "trash/claim" + ("?" + urllib.parse.urlencode(params) if params else "")
     items, headers = call_api(api, endpoint, token, body={}, cafile=cafile, timeout=timeout,
                               allow_http=allow_http, with_headers=True)
@@ -156,11 +159,12 @@ def seen_filesystems(state_dir):
 
 
 def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
-        allowed_fs=None, min_uid=None, dry_run=False, results=None, do_purge=True):
-    """Move every item, then purge; return the number of failures.
-    dry_run runs every check but moves and deletes nothing. Each item's
-    outcome (status moved/skipped/error, detail, dest) is appended to
-    `results` when given, for POST /api/trash/report."""
+        allowed_fs=None, min_uid=None, dry_run=False, results=None, do_purge=True,
+        mover=None):
+    """Move every item (with `mover`, default move_item), then purge; return
+    the number of failures. dry_run runs every check but moves and deletes
+    nothing. Each item's outcome (status moved/skipped/error, detail, dest)
+    is appended to `results` when given, for POST /api/trash/report."""
     errors = 0
     seen = set()
 
@@ -177,7 +181,7 @@ def run(items, today, state_dir, keep_days, purge_fs, check_mount=True,
                 open_target(item, check_mount, allowed_fs, min_uid).close()
                 log("would move", path)
             else:
-                dest = move_item(item, today, check_mount, allowed_fs, min_uid)
+                dest = (mover or move_item)(item, today, check_mount, allowed_fs, min_uid)
                 log("ok", f"{path} -> {dest}")
                 outcome(item, "moved", dest=dest)
         except Skip as e:
@@ -323,13 +327,15 @@ def work(args, ap, today, allowed, purge_fs):
     return 1 if errors else 0
 
 
-def claim_items(args, token, local, today):
-    """Claim this node's items and save the batch. Returns (items, errors),
-    or None when the run must stop (a dry run the server did not honor)."""
+def claim_items(args, token, local, today, action=None):
+    """Claim this node's items (of `action`, default the trash's) and save
+    the batch. Returns (items, errors), or None when the run must stop (a
+    dry run the server did not honor)."""
     confirmed = {}
     try:
         items = claim(args.api, token, args.cafile, allow_http=args.allow_http,
-                      dry_run=args.dry_run, filesystems=local, confirmations=confirmed)
+                      dry_run=args.dry_run, filesystems=local, confirmations=confirmed,
+                      action=action)
     except Exception as e:
         log("err", f"claim: {e}")
         return [], 1

@@ -46,7 +46,7 @@ describe('canTrash', () => {
 
   it('hides the icon on filesystem rows, .trash, .stats and outside FILESYSTEMS', () => {
     const admin = viewer({ isAdmin: true });
-    for (const p of ['/red/nas1', '/red/nas2/deep', '/red/nas1/.trash/x', '/red/nas1/.stats', '/opt/x']) {
+    for (const p of ['/red/nas1', '/red/nas2/deep', '/red/nas1/.trash/x', '/red/nas1/.archive/x.tar.gz', '/red/nas1/.stats', '/opt/x']) {
       expect(canTrash(admin, p, 'bob'), p).toBe(false);
     }
     expect(canTrash(viewer({ isAdmin: true, filesystems: [] }), '/red/nas1/a', 'bob')).toBe(false);

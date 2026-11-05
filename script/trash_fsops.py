@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # script/trash_fsops.py
-"""Filesystem side of the Dutopia trash mover (trash_mover.py), run as root.
+"""Filesystem side of the Dutopia trash and archive movers (trash_mover.py,
+archive_mover.py), run as root.
 
 Every step works on file descriptors opened with O_NOFOLLOW from the
 filesystem root, so a user swapping a path component for a symlink while the
 cron runs cannot redirect a check, a rename or a delete:
 
 - precheck / open_target: is this item one owner's, on this filesystem, not
-  reached through a symlink, not inside .trash/.stats? (raise Skip if not)
+  reached through a symlink, not inside .trash/.archive/.stats? (raise Skip
+  if not)
 - move_item: rename it into <fs>/.trash/<date>/<path>, pack folders as
   .tar.zst
+- archive_item: pack it into <fs>/.archive/<path>.<date>.tar.gz
 - purge: delete <fs>/.trash/<date> folders past the keep window
 """
 import datetime
@@ -17,13 +20,14 @@ import errno
 import os
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 
 KEEP_DAYS = 30
 # Owners below this uid are system accounts: never moved.
 MIN_UID = 1000
-RESERVED = (".trash", ".stats")
+RESERVED = (".trash", ".archive", ".stats")
 DATE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -151,28 +155,33 @@ def skip_reason(item, check_mount=True, allowed_fs=None, min_uid=None):
     return None
 
 
-def _check_trash(st, dev):
+def _check_reserved(st, dev, name=".trash"):
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_dev != dev:
         raise RuntimeError(
-            "unsafe .trash (a symlink, not a folder, or not owned by this user): fix it by hand"
+            f"unsafe {name} (a symlink, not a folder, or not owned by this user): fix it by hand"
         )
 
 
-def open_trash(fsfd, dev):
-    """fd of <fs>/.trash, created 0700; refuses a planted symlink or a
-    .trash that is not ours (root's, when running as root)."""
+def open_reserved(fsfd, dev, name):
+    """fd of <fs>/<name> (.trash or .archive), created 0700; refuses a
+    planted symlink or a folder that is not ours (root's, when running as
+    root)."""
     try:
-        os.mkdir(".trash", 0o700, dir_fd=fsfd)
+        os.mkdir(name, 0o700, dir_fd=fsfd)
     except FileExistsError:
         pass
-    st = os.stat(".trash", dir_fd=fsfd, follow_symlinks=False)
-    _check_trash(st, dev)
-    tfd = _open_dir(".trash", fsfd)
-    if os.fstat(tfd).st_ino != st.st_ino:
-        os.close(tfd)
-        raise RuntimeError(".trash changed while being opened")
-    os.fchmod(tfd, 0o700)
-    return tfd
+    st = os.stat(name, dir_fd=fsfd, follow_symlinks=False)
+    _check_reserved(st, dev, name)
+    rfd = _open_dir(name, fsfd)
+    if os.fstat(rfd).st_ino != st.st_ino:
+        os.close(rfd)
+        raise RuntimeError(f"{name} changed while being opened")
+    os.fchmod(rfd, 0o700)
+    return rfd
+
+
+def open_trash(fsfd, dev):
+    return open_reserved(fsfd, dev, ".trash")
 
 
 def _exists(name, dir_fd):
@@ -186,8 +195,14 @@ def _exists(name, dir_fd):
 def make_dest(tfd, fs, today, rel):
     """Create .trash/<date>/<rel's folders>; return (parent fd, free name,
     path). The name gets .1, .2… when already taken today."""
-    parts = [today.isoformat()] + rel.split("/")
-    cur = os.dup(tfd)
+    return _make_dest(tfd, os.path.join(fs, ".trash"), [today.isoformat()] + rel.split("/"), ".tar.zst")
+
+
+def _make_dest(rfd, top, parts, ext):
+    """Create the folders parts[:-1] below rfd (the reserved folder at path
+    `top`), 0700; return (their fd, a free name for parts[-1], its path).
+    The name gets .1, .2… when it or name+ext is taken."""
+    cur = os.dup(rfd)
     try:
         for comp in parts[:-1]:
             try:
@@ -199,10 +214,10 @@ def make_dest(tfd, fs, today, rel):
             cur = nxt
         base = name = parts[-1]
         n = 0
-        while _exists(name, cur) or _exists(name + ".tar.zst", cur):
+        while _exists(name, cur) or _exists(name + ext, cur):
             n += 1
             name = f"{base}.{n}"
-        return cur, name, os.path.join(fs, ".trash", *parts[:-1], name)
+        return cur, name, os.path.join(top, *parts[:-1], name)
     except BaseException:
         os.close(cur)
         raise
@@ -226,20 +241,45 @@ def rmtree_fd(parent_fd, name):
     os.rmdir(name, dir_fd=parent_fd)
 
 
+def _tar(cwd_fd, archive, member, program, chdir=None):
+    """Run tar inside cwd_fd: pack `member` (below `chdir`, when given) into
+    `archive` with `program`. A partial archive is removed when tar fails
+    (CalledProcessError)."""
+    cmd = ["tar", "--use-compress-program", program, "-cf", archive]
+    cmd += (["-C", chdir] if chdir else []) + [member]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       preexec_fn=lambda: os.fchdir(cwd_fd), pass_fds=(cwd_fd,))
+    except subprocess.CalledProcessError:
+        if _exists(archive, cwd_fd):
+            os.unlink(archive, dir_fd=cwd_fd)
+        raise
+
+
 def compress(parent_fd, name, path):
     """Pack folder `name` (below parent_fd) into <name>.tar.zst and remove
     it; return the archive's path. tar runs inside parent_fd."""
-    archive = name + ".tar.zst"
-    cmd = ["tar", "--use-compress-program", "zstd -T0 -q", "-cf", archive, name]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True,
-                       preexec_fn=lambda: os.fchdir(parent_fd), pass_fds=(parent_fd,))
+        _tar(parent_fd, name + ".tar.zst", name, "zstd -T0 -q")
     except subprocess.CalledProcessError as e:
-        if _exists(archive, parent_fd):
-            os.unlink(archive, dir_fd=parent_fd)
         raise RuntimeError(f"tar failed, left uncompressed at {path}: {e.stderr.strip()}")
     rmtree_fd(parent_fd, name)
     return path + ".tar.zst"
+
+
+def _rename_checked(t, dfd, dname, dest):
+    """Rename the checked item `t` to dfd/dname; return its stat. When what
+    was renamed is not what was checked, put it back (Skip) or stop
+    (RuntimeError, it stays at `dest`)."""
+    os.rename(t.name, dname, src_dir_fd=t.pfd, dst_dir_fd=dfd)
+    moved = os.stat(dname, dir_fd=dfd, follow_symlinks=False)
+    if (moved.st_dev, moved.st_ino) != (t.st.st_dev, t.st.st_ino):
+        # Replaced between the check and the rename: put it back.
+        if not _exists(t.name, t.pfd):
+            os.rename(dname, t.name, src_dir_fd=dfd, dst_dir_fd=t.pfd)
+            raise Skip("replaced while being moved; put back")
+        raise RuntimeError(f"replaced while being moved; left at {dest}")
+    return moved
 
 
 def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
@@ -251,14 +291,7 @@ def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
         try:
             dpfd, dname, dest = make_dest(tfd, t.fs, today, t.rel)
             try:
-                os.rename(t.name, dname, src_dir_fd=t.pfd, dst_dir_fd=dpfd)
-                moved = os.stat(dname, dir_fd=dpfd, follow_symlinks=False)
-                if (moved.st_dev, moved.st_ino) != (t.st.st_dev, t.st.st_ino):
-                    # Replaced between the check and the rename: put it back.
-                    if not _exists(t.name, t.pfd):
-                        os.rename(dname, t.name, src_dir_fd=dpfd, dst_dir_fd=t.pfd)
-                        raise Skip("replaced while being moved; put back")
-                    raise RuntimeError(f"replaced while being moved; left at {dest}")
+                moved = _rename_checked(t, dpfd, dname, dest)
                 if stat.S_ISDIR(moved.st_mode):
                     return compress(dpfd, dname, dest)
                 return dest
@@ -282,7 +315,7 @@ def purge(fs, today, keep_days=KEEP_DAYS, dry_run=False):
             st = os.stat(".trash", dir_fd=fsfd, follow_symlinks=False)
         except FileNotFoundError:
             return []
-        _check_trash(st, os.fstat(fsfd).st_dev)
+        _check_reserved(st, os.fstat(fsfd).st_dev)
         tfd = _open_dir(".trash", fsfd)
         try:
             removed = []
@@ -302,3 +335,59 @@ def purge(fs, today, keep_days=KEEP_DAYS, dry_run=False):
             os.close(tfd)
     finally:
         os.close(fsfd)
+
+
+def gzip_program():
+    """pigz (gzip on every core) when installed, else gzip."""
+    return "pigz" if shutil.which("pigz") else "gzip"
+
+
+def archive_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
+    """Check one item and pack it into <fs>/.archive/<path>.<date>.tar.gz;
+    return the archive's path. The item is first renamed into a root-only
+    staging folder next to it (same filesystem: nothing changes it while tar
+    runs) and packed under its own name, so `tar -xpzf` as root in its old
+    folder restores it with owners and modes. When tar fails it is put back.
+    Raises Skip when it must stay, another exception on failure."""
+    if item.get("action") != "archive":
+        raise Skip("not queued for the archive")
+    t = open_target(item, check_mount, allowed_fs, min_uid)
+    try:
+        afd = open_reserved(t.fsfd, t.dev, ".archive")
+        try:
+            *parents, last = t.rel.split("/")
+            parts = parents + [f"{last}.{today.isoformat()}"]
+            dpfd, stage, dest = _make_dest(afd, os.path.join(t.fs, ".archive"), parts, ".tar.gz")
+            try:
+                return _pack_into(t, dpfd, stage, dest)
+            finally:
+                os.close(dpfd)
+        finally:
+            os.close(afd)
+    finally:
+        t.close()
+
+
+def _pack_into(t, dpfd, stage, dest):
+    """archive_item's work below dpfd: stage/<name> → stage.tar.gz."""
+    os.mkdir(stage, 0o700, dir_fd=dpfd)
+    sfd = _open_dir(stage, dpfd)
+    try:
+        try:
+            _rename_checked(t, sfd, t.name, os.path.join(dest, t.name))
+        except Skip:
+            os.rmdir(stage, dir_fd=dpfd)
+            raise
+        try:
+            _tar(dpfd, stage + ".tar.gz", t.name, gzip_program(), chdir=stage)
+        except subprocess.CalledProcessError as e:
+            why = e.stderr.strip()
+            if _exists(t.name, t.pfd):
+                raise RuntimeError(f"tar failed ({why}); its old path is taken again: left at {dest}")
+            os.rename(t.name, t.name, src_dir_fd=sfd, dst_dir_fd=t.pfd)
+            os.rmdir(stage, dir_fd=dpfd)
+            raise RuntimeError(f"tar failed, put back: {why}")
+    finally:
+        os.close(sfd)
+    rmtree_fd(dpfd, stage)
+    return dest + ".tar.gz"

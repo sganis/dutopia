@@ -12,11 +12,12 @@ const entry = (path: string, owner: string): TrashEntry =>
 vi.mock('$api', () => ({
   api: {
     trashList: vi.fn(async () => server.slice()),
-    trashAdd: vi.fn(async (path: string, size: number, owner: string) => {
-      const e = { ...entry(path, owner), size };
-      // Like the server: a new folder absorbs its queued children.
+    trashAdd: vi.fn(async (path: string, size: number, owner: string, action = 'trash') => {
+      const e = { ...entry(path, owner), size, action } as TrashEntry;
+      // Like the server: a new folder absorbs its queued children, and the
+      // other action replaces the entry.
       for (let i = server.length - 1; i >= 0; i--) {
-        if (server[i].path.startsWith(path + '/')) server.splice(i, 1);
+        if (server[i].path === path || server[i].path.startsWith(path + '/')) server.splice(i, 1);
       }
       server.push(e);
       return e;
@@ -95,6 +96,36 @@ describe('cleanupQueue extras', () => {
     await q.toggleTrash('/red/nas1/t', 1, 'bob');
     expect(q.isQueued('/red/nas1/t')).toBe(false);
     expect(server).toEqual([]);
+  });
+
+  it('the archive icon queues for the archive, the trash icon switches it', async () => {
+    await q.toggleTrash('/red/nas1/t', 1, 'bob', 'archive');
+    expect(q.queuedAction('/red/nas1/t')).toBe('archive');
+    expect(await q.toggleTrash('/red/nas1/t', 1, 'bob')).toBe('queued');
+    expect(q.queuedAction('/red/nas1/t')).toBe('trash');
+    expect(server.map((e) => [e.path, e.action])).toEqual([['/red/nas1/t', 'trash']]);
+    expect(await q.toggleTrash('/red/nas1/t', 1, 'bob')).toBe('kept');
+    expect(q.queuedAction('/red/nas1/t')).toBeNull();
+  });
+
+  it('entries of an older duapi (no action) are trash', async () => {
+    server.push(entry('/red/nas1/old', 'bob'));
+    await q.loadCleanupQueue();
+    expect(q.queuedAction('/red/nas1/old')).toBe('trash');
+  });
+
+  it('Script and Notify are about the trash items only', async () => {
+    const { api } = await import('$api');
+    await q.addToCleanupQueue('/red/nas1/t', 1, 'bob');
+    await q.addToCleanupQueue('/red/nas1/a', 1, 'bob', 'archive');
+    URL.createObjectURL = vi.fn(() => 'blob:x');
+    URL.revokeObjectURL = vi.fn();
+    await q.downloadScript('bob');
+    await q.notifyUser('bob');
+    const sent = [[{ path: '/red/nas1/t', size: 1 }]];
+    expect((api.cleanupScript as any).mock.lastCall.slice(1)).toEqual(sent);
+    expect((api.cleanupNotify as any).mock.lastCall.slice(1, 2)).toEqual(sent);
+    expect(q.cleanupQueue.items.find((i) => i.path === '/red/nas1/a')?.status).toBe('queued');
   });
 
   it('loads what the nightly run did', async () => {
