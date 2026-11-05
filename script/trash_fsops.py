@@ -10,8 +10,8 @@ cron runs cannot redirect a check, a rename or a delete:
 - precheck / open_target: is this item one owner's, on this filesystem, not
   reached through a symlink, not inside .trash/.archive/.stats? (raise Skip
   if not)
-- move_item: rename it into <fs>/.trash/<date>/<path>, pack folders as
-  .tar.zst
+- move_item: rename it into <fs>/.trash/<date>/<path>, as is (instant at
+  any size; owners, modes and ACLs untouched)
 - archive_item: pack it into <fs>/.archive/<path>.<date>.tar.gz
 - purge: delete <fs>/.trash/<date> folders past the keep window
 """
@@ -195,7 +195,7 @@ def _exists(name, dir_fd):
 def make_dest(tfd, fs, today, rel):
     """Create .trash/<date>/<rel's folders>; return (parent fd, free name,
     path). The name gets .1, .2… when already taken today."""
-    return _make_dest(tfd, os.path.join(fs, ".trash"), [today.isoformat()] + rel.split("/"), ".tar.zst")
+    return _make_dest(tfd, os.path.join(fs, ".trash"), [today.isoformat()] + rel.split("/"), "")
 
 
 def _make_dest(rfd, top, parts, ext):
@@ -269,18 +269,6 @@ def _tar(cwd_fd, archive, member, program, chdir=None, owner=None):
     os.rename(part, archive, src_dir_fd=cwd_fd, dst_dir_fd=cwd_fd)
 
 
-def compress(parent_fd, name, path, owner=None):
-    """Pack folder `name` (below parent_fd) into <name>.tar.zst, owned by
-    `owner`, and remove it; return the archive's path. tar runs inside
-    parent_fd."""
-    try:
-        _tar(parent_fd, name + ".tar.zst", name, "zstd -T0 -q", owner=owner)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"tar failed, left uncompressed at {path}: {e.stderr.strip()}")
-    rmtree_fd(parent_fd, name)
-    return path + ".tar.zst"
-
-
 def _rename_checked(t, dfd, dname, dest):
     """Rename the checked item `t` to dfd/dname; return its stat. When what
     was renamed is not what was checked, put it back (Skip) or stop
@@ -297,17 +285,17 @@ def _rename_checked(t, dfd, dname, dest):
 
 
 def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
-    """Check and move one item into the trash; return where it ended up.
-    Raises Skip when it must stay, another exception on failure."""
+    """Check and move one item into the trash, as is (a rename: instant at
+    any size, nothing rewritten); return where it ended up. Restore is a
+    rename back. Raises Skip when it must stay, another exception on
+    failure."""
     t = open_target(item, check_mount, allowed_fs, min_uid)
     try:
         tfd = open_trash(t.fsfd, t.dev)
         try:
             dpfd, dname, dest = make_dest(tfd, t.fs, today, t.rel)
             try:
-                moved = _rename_checked(t, dpfd, dname, dest)
-                if stat.S_ISDIR(moved.st_mode):
-                    return compress(dpfd, dname, dest, (moved.st_uid, moved.st_gid))
+                _rename_checked(t, dpfd, dname, dest)
                 return dest
             finally:
                 os.close(dpfd)

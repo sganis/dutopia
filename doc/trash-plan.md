@@ -4,7 +4,7 @@
 
 Today the web cart lives only in the browser (`localStorage`, `browser/src/ts/cleanupQueue.svelte.ts`).
 No external process can see it. Goal: the cart moves to the server, **Keep** is the 1-day undo, and
-a nightly cron moves the items to `.trash`, packs folders into one `.tar.zst`, and purges after 30 days.
+a nightly cron moves the items to `.trash` and purges after 30 days.
 Users can't restore after the undo window.
 
 Dutopia has no notion of a filesystem today: the DB is a path tree from `/`, and `/red/nas1` is just
@@ -16,7 +16,7 @@ a folder. This plan adds one, as an explicit list, because both the trash and th
 UI trash icon ─► duapi ─► /data/trash/queue.json          (the cart, on the PVC)
 UI Keep       ─► duapi ─► removes the entry
 cron 02:00    ─► POST /api/trash/claim (token) ─► items older than 24h, removed from the queue
-              ─► mv path to <fs>/.trash/<date>/…, tar+zstd folders, purge dates > 30 days
+              ─► mv path to <fs>/.trash/<date>/…, purge dates > 30 days
 ```
 
 ## 0. Filesystems — `FILESYSTEMS` env in duapi
@@ -74,8 +74,7 @@ cron 02:00    ─► POST /api/trash/claim (token) ─► items older than 24h, 
 3. Trash = `<fs>/.trash` (`0700 root`), next to `<fs>/.stats`. `fs` comes in the batch, so the
    cron needs no filesystem list of its own.
    Destination keeps the path: `/red/nas1/a/b/run1` → `/red/nas1/.trash/2026-11-04/a/b/run1`.
-4. `os.rename` (instant, same filesystem), then folder → `run1.tar.zst` (`tar -I 'zstd -T0'`)
-   and `rm -rf`.
+4. `os.rename` (instant, same filesystem); folders stay folders (see below).
 5. Delete `<fs>/.trash/<date>` folders older than 30 days, for every `fs` it has seen (or
    `--purge /red/nas1 --purge /red/nas2`).
 
@@ -94,7 +93,7 @@ Crontab: `0 2 * * * python3 /opt/dutopia/trash_mover.py --api https://dutopia.ap
   and `npm test && npm run build`.
 - Local: `FILESYSTEMS=/tmp/fs1,/tmp/fs2 TRASH_TOKEN=x ./duapi du.db` → home shows fs1 and fs2 →
   trash a folder → `queue.json` gets the entry with `fs` → Keep removes it → run the script →
-  it ends up as `/tmp/fs1/.trash/<date>/…/name.tar.zst`.
+  it ends up as `/tmp/fs1/.trash/<date>/…/name`.
 
 ## Implemented beyond the plan
 
@@ -111,6 +110,12 @@ Found while building and reviewing it (see `deploy/README.md` §9):
   queued children of the same owner and filesystem.
 - **Per-node claim**: the cron reads FILESYSTEMS from `/api/health` and claims
   only the filesystems it mounts (`?fs=`), so several cron nodes coexist.
+- **Folders are not packed**: packing into `.tar.zst` read and rewrote all
+  the data (hours for a 100 TB folder, and the space twice while it ran)
+  only to delete it 30 days later, and lost ACLs. A rename is instant at any
+  size, keeps everything, leaves the folder browsable in the dashboard, and
+  restore is a rename back. The archive still packs (`.tar.gz`): keeping it
+  compressed is its purpose.
 - **No history**: a claimed item leaves `queue.json`, the cron logs each
   result on its node, and the next scan shows it under `<fs>/.trash` (or
   `.archive`). An earlier `history.json` was dropped: the queue file only

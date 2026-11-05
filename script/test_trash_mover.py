@@ -1,5 +1,5 @@
 # script/test_trash_mover.py
-# Run: python3 -m unittest script/test_trash_mover.py  (needs tar + zstd)
+# Run: python3 -m unittest script/test_trash_mover.py
 import contextlib
 import datetime
 import http.server
@@ -7,7 +7,6 @@ import io
 import json
 import os
 import pwd
-import subprocess
 import sys
 import tempfile
 import threading
@@ -145,18 +144,17 @@ class Move(Fs):
         self.assertFalse(os.path.exists(p))
         self.assertEqual(os.stat(os.path.join(self.fs, ".trash")).st_mode & 0o777, 0o700)
 
-    def test_folder_becomes_tar_zst(self):
+    def test_folder_is_moved_as_is(self):
         self.mk("a/run1/x.txt", b"hello")
         self.mk("a/run1/sub/y.txt")
+        before = os.stat(os.path.join(self.fs, "a/run1"))
         dest = tm.move_item(self.item(os.path.join(self.fs, "a/run1")), TODAY, check_mount=False)
-        self.assertEqual(dest, os.path.join(self.fs, ".trash/2026-11-04/a/run1.tar.zst"))
-        self.assertFalse(os.path.exists(os.path.join(self.fs, ".trash/2026-11-04/a/run1")))
-        names = subprocess.run(
-            ["tar", "--use-compress-program", "zstd -d", "-tf", dest],
-            check=True, capture_output=True, text=True,
-        ).stdout.split()
-        self.assertIn("run1/x.txt", names)
-        self.assertIn("run1/sub/y.txt", names)
+        self.assertEqual(dest, os.path.join(self.fs, ".trash/2026-11-04/a/run1"))
+        self.assertFalse(os.path.exists(os.path.join(self.fs, "a/run1")))
+        self.assertEqual(os.stat(dest).st_ino, before.st_ino)  # renamed, not copied
+        with open(os.path.join(dest, "x.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"hello")
+        self.assertTrue(os.path.isfile(os.path.join(dest, "sub/y.txt")))
 
     def test_same_path_twice_a_day_gets_a_suffix(self):
         first = tm.move_item(self.item(self.mk("a/f")), TODAY, check_mount=False)
@@ -235,7 +233,7 @@ class Hardening(Fs):
             dest = tm.move_item(item, TODAY, check_mount=False)
         self.assertTrue(os.path.isfile(os.path.join(self.fs, "projects/bob/data")))
         self.assertFalse(os.path.exists(os.path.join(self.fs, "alice/x.real/projects")))
-        self.assertTrue(dest.endswith("alice/x/projects.tar.zst"))
+        self.assertTrue(dest.endswith("alice/x/projects"))
 
     def test_planted_trash_symlink_is_refused(self):
         victim = os.path.join(self.fs, "bob")
@@ -295,7 +293,7 @@ class EndToEnd(Fs):
             self.assertEqual(errors, 0)
             t = os.path.join(self.fs, ".trash/2026-11-04/p")
             self.assertTrue(os.path.isfile(os.path.join(t, "file")))
-            self.assertTrue(os.path.isfile(os.path.join(t, "dir.tar.zst")))
+            self.assertTrue(os.path.isfile(os.path.join(t, "dir/x")))
             self.assertFalse(os.path.exists(os.path.join(self.fs, ".trash/2026-01-01")))
 
 

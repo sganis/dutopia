@@ -6,7 +6,7 @@
 
 move: claim the items queued over TRASH_UNDO_HOURS ago on the filesystems
 this node mounts, save the batch, move each to <fs>/.trash/<date>/<path>
-(folders as .tar.zst), log each result. Items that are gone, not their
+(a rename: folders stay folders), log each result. Items that are gone, not their
 owner's, a folder holding other owners' files, or reached through a symlink
 are skipped (see trash_fsops.py).
 purge: delete <fs>/.trash/<date> folders older than TRASH_KEEP_DAYS.

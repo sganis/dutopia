@@ -1,14 +1,13 @@
 # Trash and archive movers
 
 The web UI only queues items. A root cron on a node that mounts the
-filesystems moves them to `<fs>/.trash/<date>/<path>` (folders as `.tar.zst`)
-and purges old trash. Keep works for 24h (`TRASH_UNDO_HOURS`); moved items stay
+filesystems moves them to `<fs>/.trash/<date>/<path>` as they are (a rename:
+instant at any size, owners, modes and ACLs untouched) and purges old trash. Keep works for 24h (`TRASH_UNDO_HOURS`); moved items stay
 30 days (`TRASH_KEEP_DAYS`). Upgrade duapi before the cron.
 
 Once the cron takes an item it leaves the queue; the cron logs what it did.
 After the next scan, `<fs>/.trash` and `<fs>/.archive` are browsed in the
-dashboard like any folder (packed folders and archives belong to the item's
-owner).
+dashboard like any folder (archives belong to the item's owner).
 
 Items sent to the archive wait the same 24h, then a second cron
 (`archive_mover.py`, see [Archive](#archive)) packs them into
@@ -16,8 +15,9 @@ Items sent to the archive wait the same 24h, then a second cron
 
 ## Install (on the node)
 
-Needs Python 3.7+, GNU tar, zstd, and the filesystems mounted at the same
-paths as `FILESYSTEMS`, without root squash.
+Needs Python 3.7+, the filesystems mounted at the same paths as
+`FILESYSTEMS` without root squash, and for the archive GNU tar and gzip
+(pigz if installed).
 
 ```bash
 sudo install -D -m 0755 script/trash_mover.py /opt/dutopia/trash_mover.py
@@ -52,7 +52,7 @@ MAILTO=storage-admins@corp.local
 - **A run died halfway:** `... --batch /var/lib/dutopia-trash/<date>.json`
 - **What happened to an item:** the log, one line per item (`ok`, `skip` or
   `err`); the claimed batch is in `/var/lib/dutopia-trash/<date>.json`.
-- **Restore:** `tar --use-compress-program 'zstd -d' -xpf <fs>/.trash/<date>/a/b/run1.tar.zst -C <fs>/a/b`
+- **Restore:** `mv <fs>/.trash/<date>/a/b/run1 <fs>/a/b/` (instant)
 - **Free space now:** `... purge --keep-days 7`
 - **401:** the token file differs from the pod's `TRASH_TOKEN`.
 - **Private CA:** add `--cafile /path/to/ca.pem`.
