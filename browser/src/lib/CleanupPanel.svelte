@@ -157,8 +157,8 @@
           <div class="text-lg font-semibold text-gray-100">Trash &amp; archive</div>
           <div class="text-xs text-gray-400">
             {api.trashUndoHours}h after they are queued, trashed items move to the filesystem's
-            .trash and are purged after {api.trashKeepDays} days; archived items are packed into
-            its .archive as .tar.gz and kept. Keep undoes it until then.
+            .trash and are deleted after {api.trashKeepDays} days; archived items move to its
+            .archive and are kept. Keep undoes it until then.
           </div>
         </div>
         <button

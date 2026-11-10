@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # script/trash_fsops.py
-"""Filesystem side of the Dutopia trash and archive movers (trash_mover.py,
-archive_mover.py), run as root.
+"""Filesystem side of the Dutopia mover (mover.py, cron) and archiver
+(archiver.py, by hand), run as root.
 
 Every step works on file descriptors opened with O_NOFOLLOW from the
 filesystem root, so a user swapping a path component for a symlink while the
@@ -10,12 +10,14 @@ cron runs cannot redirect a check, a rename or a delete:
 - precheck / open_target: is this item one owner's, on this filesystem, not
   reached through a symlink, not inside .trash/.archive/.stats? (raise Skip
   if not)
-- move_item: rename it into <fs>/.trash/<date>/<path>, as is (instant at
-  any size; owners, modes and ACLs untouched)
-- archive_item: pack it into <fs>/.archive/<path>.<date>.tar.gz
-- purge: delete <fs>/.trash/<date> folders past the keep window
+- move_item: rename it into <fs>/.trash/<date>/<path>, as is
+- stage_item: rename it into <fs>/.archive/<path>.<date>/<name>, as is
+- pack_archive: pack each staged item into <fs>/.archive/<path>.<date>.tar.gz
+
+Moves are renames: instant at any size; owners, modes and ACLs untouched.
+Nothing here deletes from .trash: old trash is removed by hand
+(deploy/TRASH.md).
 """
-import datetime
 import errno
 import os
 import pwd
@@ -24,11 +26,11 @@ import shutil
 import stat
 import subprocess
 
-KEEP_DAYS = 30
 # Owners below this uid are system accounts: never moved.
 MIN_UID = 1000
 RESERVED = (".trash", ".archive", ".stats")
-DATE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A staged item's folder is <name>.<date>, or <name>.<date>.N.
+STAGE_SUFFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(\.\d+)?$")
 
 
 def fs_of_item(item):
@@ -75,7 +77,7 @@ def precheck(item, check_mount=True, allowed_fs=None, min_uid=None):
 def check_tree(parent_fd, name, st, uid, dev, owner):
     """Raise Skip unless every entry under folder `name` belongs to `uid` and
     to the filesystem `dev`: a folder holding other users' files, or another
-    mount, is not one user's to trash."""
+    mount, is not one user's to move."""
     dfd = _open_dir(name, parent_fd)
     try:
         top = os.fstat(dfd)
@@ -155,27 +157,38 @@ def skip_reason(item, check_mount=True, allowed_fs=None, min_uid=None):
     return None
 
 
-def _check_reserved(st, dev, name=".trash"):
+def _check_reserved(st, dev, name):
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_dev != dev:
         raise RuntimeError(
             f"unsafe {name} (a symlink, not a folder, or not owned by this user): fix it by hand"
         )
 
 
-def open_reserved(fsfd, dev, name):
-    """fd of <fs>/<name> (.trash or .archive), created 0700; refuses a
-    planted symlink or a folder that is not ours (root's, when running as
-    root)."""
+def open_existing_reserved(fsfd, dev, name):
+    """fd of <fs>/<name> (.trash or .archive), or None when there is none;
+    refuses a planted symlink or a folder that is not ours (root's, when
+    running as root)."""
     try:
-        os.mkdir(name, 0o700, dir_fd=fsfd)
-    except FileExistsError:
-        pass
-    st = os.stat(name, dir_fd=fsfd, follow_symlinks=False)
+        st = os.stat(name, dir_fd=fsfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
     _check_reserved(st, dev, name)
     rfd = _open_dir(name, fsfd)
     if os.fstat(rfd).st_ino != st.st_ino:
         os.close(rfd)
         raise RuntimeError(f"{name} changed while being opened")
+    return rfd
+
+
+def open_reserved(fsfd, dev, name):
+    """open_existing_reserved, creating <fs>/<name> first; always 0700."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=fsfd)
+    except FileExistsError:
+        pass
+    rfd = open_existing_reserved(fsfd, dev, name)
+    if rfd is None:
+        raise RuntimeError(f"{name} vanished while being opened")
     os.fchmod(rfd, 0o700)
     return rfd
 
@@ -241,13 +254,85 @@ def rmtree_fd(parent_fd, name):
     os.rmdir(name, dir_fd=parent_fd)
 
 
+def _rename_checked(t, dfd, dname, dest):
+    """Rename the checked item `t` to dfd/dname; return its stat. When what
+    was renamed is not what was checked, put it back (Skip) or stop
+    (RuntimeError, it stays at `dest`)."""
+    os.rename(t.name, dname, src_dir_fd=t.pfd, dst_dir_fd=dfd)
+    moved = os.stat(dname, dir_fd=dfd, follow_symlinks=False)
+    if (moved.st_dev, moved.st_ino) != (t.st.st_dev, t.st.st_ino):
+        # Replaced between the check and the rename: put it back.
+        if not _exists(t.name, t.pfd):
+            os.rename(dname, t.name, src_dir_fd=dfd, dst_dir_fd=t.pfd)
+            raise Skip("replaced while being moved; put back")
+        raise RuntimeError(f"replaced while being moved; left at {dest}")
+    return moved
+
+
+def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
+    """Check and move one item into the trash, as is; return where it ended
+    up. Restore is a rename back. Raises Skip when it must stay, another
+    exception on failure."""
+    t = open_target(item, check_mount, allowed_fs, min_uid)
+    try:
+        tfd = open_trash(t.fsfd, t.dev)
+        try:
+            dpfd, dname, dest = make_dest(tfd, t.fs, today, t.rel)
+            try:
+                _rename_checked(t, dpfd, dname, dest)
+                return dest
+            finally:
+                os.close(dpfd)
+        finally:
+            os.close(tfd)
+    finally:
+        t.close()
+
+
+def stage_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
+    """Check one item queued for the archive and move it, as is, into the
+    root-only <fs>/.archive/<path>.<date>/<name>; archiver.py packs it later
+    into <path>.<date>.tar.gz. Returns where it is now. Restore is a rename
+    back. Raises Skip when it must stay, another exception on failure."""
+    if item.get("action") != "archive":
+        raise Skip("not queued for the archive")
+    t = open_target(item, check_mount, allowed_fs, min_uid)
+    try:
+        afd = open_reserved(t.fsfd, t.dev, ".archive")
+        try:
+            *parents, last = t.rel.split("/")
+            parts = parents + [f"{last}.{today.isoformat()}"]
+            dpfd, stage, dest = _make_dest(afd, os.path.join(t.fs, ".archive"), parts, ".tar.gz")
+            try:
+                os.mkdir(stage, 0o700, dir_fd=dpfd)
+                sfd = _open_dir(stage, dpfd)
+                try:
+                    _rename_checked(t, sfd, t.name, os.path.join(dest, t.name))
+                except Skip:
+                    os.rmdir(stage, dir_fd=dpfd)
+                    raise
+                finally:
+                    os.close(sfd)
+                return os.path.join(dest, t.name)
+            finally:
+                os.close(dpfd)
+        finally:
+            os.close(afd)
+    finally:
+        t.close()
+
+
+def gzip_program():
+    """pigz (gzip on every core) when installed, else gzip."""
+    return "pigz" if shutil.which("pigz") else "gzip"
+
+
 def _tar(cwd_fd, archive, member, program, chdir=None, owner=None):
     """Run tar inside cwd_fd: pack `member` (below `chdir`, when given) into
     `archive` with `program`. It is written as `archive`.part, read back
-    whole (`program -t`), fsynced, given to `owner` (uid, gid: the dashboard
-    then counts it as theirs after the next scan) and only then renamed, so
-    a crash never leaves a truncated file under the final name. The .part
-    is removed when tar or the test fails (CalledProcessError)."""
+    whole (`program -t`), fsynced, given to `owner` (uid, gid) and only then
+    renamed, so a crash never leaves a truncated file under the final name.
+    The .part is removed when tar or the test fails (CalledProcessError)."""
     part = archive + ".part"
     cmd = ["tar", "--use-compress-program", program, "-cf", part]
     cmd += (["-C", chdir] if chdir else []) + [member]
@@ -269,128 +354,83 @@ def _tar(cwd_fd, archive, member, program, chdir=None, owner=None):
     os.rename(part, archive, src_dir_fd=cwd_fd, dst_dir_fd=cwd_fd)
 
 
-def _rename_checked(t, dfd, dname, dest):
-    """Rename the checked item `t` to dfd/dname; return its stat. When what
-    was renamed is not what was checked, put it back (Skip) or stop
-    (RuntimeError, it stays at `dest`)."""
-    os.rename(t.name, dname, src_dir_fd=t.pfd, dst_dir_fd=dfd)
-    moved = os.stat(dname, dir_fd=dfd, follow_symlinks=False)
-    if (moved.st_dev, moved.st_ino) != (t.st.st_dev, t.st.st_ino):
-        # Replaced between the check and the rename: put it back.
-        if not _exists(t.name, t.pfd):
-            os.rename(dname, t.name, src_dir_fd=dfd, dst_dir_fd=t.pfd)
-            raise Skip("replaced while being moved; put back")
-        raise RuntimeError(f"replaced while being moved; left at {dest}")
-    return moved
+def _staged_name(folder, inside):
+    """The item staged in `folder` (holding the entries `inside`), or None:
+    a staged folder is <name>.<date>[.N] holding just <name>."""
+    if len(inside) != 1:
+        return None
+    name = inside[0]
+    rest = folder[len(name) + 1:] if folder.startswith(name + ".") else ""
+    return name if STAGE_SUFFIX.match(rest) else None
 
 
-def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
-    """Check and move one item into the trash, as is (a rename: instant at
-    any size, nothing rewritten); return where it ended up. Restore is a
-    rename back. Raises Skip when it must stay, another exception on
-    failure."""
-    t = open_target(item, check_mount, allowed_fs, min_uid)
-    try:
-        tfd = open_trash(t.fsfd, t.dev)
-        try:
-            dpfd, dname, dest = make_dest(tfd, t.fs, today, t.rel)
+def find_stages(afd):
+    """Walk .archive (fd afd); yield (parent fd, parent path relative to
+    .archive, stage folder, item name) for each staged item. Only this
+    user's (root's) folders are walked, never a staged item: what is inside
+    belongs to its owner and is never looked at."""
+    me = os.geteuid()
+    for root, dirs, _files, rfd in os.fwalk(".", dir_fd=afd, follow_symlinks=False):
+        walk = []
+        for d in dirs:
+            st = os.stat(d, dir_fd=rfd, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != me:
+                continue
+            sfd = _open_dir(d, rfd)
             try:
-                _rename_checked(t, dpfd, dname, dest)
-                return dest
+                name = _staged_name(d, os.listdir(sfd))
             finally:
-                os.close(dpfd)
-        finally:
-            os.close(tfd)
+                os.close(sfd)
+            if name is None:
+                walk.append(d)
+            else:
+                yield rfd, os.path.normpath(root), d, name
+        dirs[:] = walk
+
+
+def pack_stage(pfd, stage, name, dest):
+    """Pack stage/<name> (below pfd; `dest` is the stage's path) into
+    <stage>.tar.gz, given to the item's owner (the dashboard then counts it
+    as theirs), then remove the staged copy; return the archive's path.
+    When tar fails (e.g. the filesystem is full) the staged item stays as is
+    (RuntimeError)."""
+    archive = stage + ".tar.gz"
+    if _exists(archive, pfd):
+        raise RuntimeError(f"{dest}.tar.gz already exists: check by hand")
+    sfd = _open_dir(stage, pfd)
+    try:
+        st = os.stat(name, dir_fd=sfd, follow_symlinks=False)
     finally:
-        t.close()
+        os.close(sfd)
+    try:
+        _tar(pfd, archive, name, gzip_program(), chdir=stage, owner=(st.st_uid, st.st_gid))
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"tar failed, left staged: {e.stderr.strip()}")
+    rmtree_fd(pfd, stage)
+    return dest + ".tar.gz"
 
 
-def purge(fs, today, keep_days=KEEP_DAYS, dry_run=False):
-    """Delete <fs>/.trash/<date> folders older than keep_days; return them
-    (dry_run: only list them). A filesystem that is not there has nothing."""
+def pack_archive(fs, dry_run=False):
+    """Pack every item staged in <fs>/.archive; yield (staged path, archive
+    path or None, error or None) per item (dry_run: only find them). A
+    filesystem with no .archive has nothing."""
+    fsfd = os.open(fs, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fsfd = os.open(fs, os.O_RDONLY | os.O_DIRECTORY)
-    except FileNotFoundError:
-        return []
-    try:
+        afd = open_existing_reserved(fsfd, os.fstat(fsfd).st_dev, ".archive")
+        if afd is None:
+            return
         try:
-            st = os.stat(".trash", dir_fd=fsfd, follow_symlinks=False)
-        except FileNotFoundError:
-            return []
-        _check_reserved(st, os.fstat(fsfd).st_dev)
-        tfd = _open_dir(".trash", fsfd)
-        try:
-            removed = []
-            for name in sorted(os.listdir(tfd)):
-                if not DATE_DIR.match(name):
+            for pfd, rel, stage, name in find_stages(afd):
+                dest = os.path.normpath(os.path.join(fs, ".archive", rel, stage))
+                staged = os.path.join(dest, name)
+                if dry_run:
+                    yield staged, None, None
                     continue
                 try:
-                    day = datetime.date.fromisoformat(name)
-                except ValueError:
-                    continue
-                if (today - day).days > keep_days:
-                    if not dry_run:
-                        rmtree_fd(tfd, name)
-                    removed.append(os.path.join(fs, ".trash", name))
-            return removed
-        finally:
-            os.close(tfd)
-    finally:
-        os.close(fsfd)
-
-
-def gzip_program():
-    """pigz (gzip on every core) when installed, else gzip."""
-    return "pigz" if shutil.which("pigz") else "gzip"
-
-
-def archive_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
-    """Check one item and pack it into <fs>/.archive/<path>.<date>.tar.gz;
-    return the archive's path. The item is first renamed into a root-only
-    staging folder next to it (same filesystem: nothing changes it while tar
-    runs) and packed under its own name, so `tar -xpzf` as root in its old
-    folder restores it with owners and modes. When tar fails it is put back.
-    Raises Skip when it must stay, another exception on failure."""
-    if item.get("action") != "archive":
-        raise Skip("not queued for the archive")
-    t = open_target(item, check_mount, allowed_fs, min_uid)
-    try:
-        afd = open_reserved(t.fsfd, t.dev, ".archive")
-        try:
-            *parents, last = t.rel.split("/")
-            parts = parents + [f"{last}.{today.isoformat()}"]
-            dpfd, stage, dest = _make_dest(afd, os.path.join(t.fs, ".archive"), parts, ".tar.gz")
-            try:
-                return _pack_into(t, dpfd, stage, dest)
-            finally:
-                os.close(dpfd)
+                    yield staged, pack_stage(pfd, stage, name, dest), None
+                except (OSError, RuntimeError) as e:
+                    yield staged, None, e
         finally:
             os.close(afd)
     finally:
-        t.close()
-
-
-def _pack_into(t, dpfd, stage, dest):
-    """archive_item's work below dpfd: stage/<name> → stage.tar.gz."""
-    os.mkdir(stage, 0o700, dir_fd=dpfd)
-    sfd = _open_dir(stage, dpfd)
-    try:
-        try:
-            _rename_checked(t, sfd, t.name, os.path.join(dest, t.name))
-        except Skip:
-            os.rmdir(stage, dir_fd=dpfd)
-            raise
-        try:
-            _tar(dpfd, stage + ".tar.gz", t.name, gzip_program(), chdir=stage,
-                 owner=(t.st.st_uid, t.st.st_gid))
-        except subprocess.CalledProcessError as e:
-            why = e.stderr.strip()
-            if _exists(t.name, t.pfd):
-                raise RuntimeError(f"tar failed ({why}); its old path is taken again: left at {dest}")
-            os.rename(t.name, t.name, src_dir_fd=sfd, dst_dir_fd=t.pfd)
-            os.rmdir(stage, dir_fd=dpfd)
-            raise RuntimeError(f"tar failed, put back: {why}")
-    finally:
-        os.close(sfd)
-    rmtree_fd(dpfd, stage)
-    return dest + ".tar.gz"
+        os.close(fsfd)

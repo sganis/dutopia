@@ -1,5 +1,5 @@
-# script/test_trash_mover.py
-# Run: python3 -m unittest script/test_trash_mover.py
+# script/test_mover.py
+# Run: python3 -m unittest script/test_mover.py
 import contextlib
 import datetime
 import http.server
@@ -14,11 +14,12 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import trash_mover as tm  # noqa: E402
+import mover as tm  # noqa: E402
+import trash_fsops as fsops  # noqa: E402
 
 ME = pwd.getpwuid(os.geteuid()).pw_name
 # Tests run as a normal user, whose uid may be below the production floor.
-tm.fsops.MIN_UID = 0
+fsops.MIN_UID = 0
 TODAY = datetime.date(2026, 11, 4)
 
 
@@ -27,10 +28,10 @@ class FakeApi:
     /api/trash/claim returns `items`. Every request is kept in `requests` as
     (method, path, body)."""
 
-    def __init__(self, filesystems=(), items=(), honor=True, keep_days=None):
+    def __init__(self, filesystems=(), items=(), honor=True):
         self.filesystems, self.items, self.requests = list(filesystems), list(items), []
-        self.keep_days = keep_days
-        # honor=False plays an older duapi that ignores ?dry_run and ?fs.
+        # honor=False plays an older duapi that ignores ?dry_run, ?fs and
+        # ?action (and has no archive queue).
         self.honor = honor
 
     def __enter__(self):
@@ -52,16 +53,17 @@ class FakeApi:
             def do_GET(self):
                 api.requests.append(("GET", self.path, None, self.headers.get("Authorization")))
                 # An older duapi (honor=False) has no archive queue either.
-                health = {"filesystems": api.filesystems, "archive": api.honor}
-                if api.keep_days is not None:
-                    health["trash_keep_days"] = api.keep_days
-                self._reply(health)
+                self._reply({"filesystems": api.filesystems, "archive": api.honor})
 
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"null")
                 api.requests.append(("POST", self.path, body, self.headers.get("Authorization")))
-                self._reply(api.items if self.path.startswith("/api/trash/claim") else {"recorded": 1})
+                if not self.path.startswith("/api/trash/claim"):
+                    return self._reply({"recorded": 1})
+                want = "archive" if "action=archive" in self.path else "trash"
+                self._reply([i for i in api.items
+                             if not api.honor or (i.get("action") or "trash") == want])
 
             def log_message(self, *a):
                 pass
@@ -73,6 +75,7 @@ class FakeApi:
 
     def __exit__(self, *a):
         self.srv.shutdown()
+        self.srv.server_close()
 
     def posts(self, prefix):
         return [r for r in self.requests if r[0] == "POST" and r[1].startswith(prefix)]
@@ -103,42 +106,42 @@ class Fs(unittest.TestCase):
 class SkipReason(Fs):
     def test_ok_item_has_no_reason(self):
         p = self.mk("a/file")
-        self.assertIsNone(tm.skip_reason(self.item(p), check_mount=False))
+        self.assertIsNone(fsops.skip_reason(self.item(p), check_mount=False))
 
     def test_gone(self):
-        self.assertIn("gone", tm.skip_reason(self.item(self.fs + "/nope"), check_mount=False))
+        self.assertIn("gone", fsops.skip_reason(self.item(self.fs + "/nope"), check_mount=False))
 
     def test_inside_trash_or_stats_or_root(self):
         for rel in [".trash/2026-11-01/x", ".stats/scan.csv"]:
             p = self.mk(rel)
-            self.assertIsNotNone(tm.skip_reason(self.item(p), check_mount=False), rel)
-        self.assertIsNotNone(tm.skip_reason(self.item(self.fs), check_mount=False))
+            self.assertIsNotNone(fsops.skip_reason(self.item(p), check_mount=False), rel)
+        self.assertIsNotNone(fsops.skip_reason(self.item(self.fs), check_mount=False))
 
     def test_outside_fs(self):
         with tempfile.NamedTemporaryFile() as f:
-            self.assertIsNotNone(tm.skip_reason(self.item(f.name), check_mount=False))
+            self.assertIsNotNone(fsops.skip_reason(self.item(f.name), check_mount=False))
 
     def test_not_owned_and_unknown_owner(self):
         p = self.mk("a/file")
         if os.geteuid() != 0:
-            self.assertIn("owner", tm.skip_reason(self.item(p, owner="root"), check_mount=False))
-        self.assertIn("owner", tm.skip_reason(self.item(p, owner="no-such-user-xyz"), check_mount=False))
+            self.assertIn("owner", fsops.skip_reason(self.item(p, owner="root"), check_mount=False))
+        self.assertIn("owner", fsops.skip_reason(self.item(p, owner="no-such-user-xyz"), check_mount=False))
 
     def test_path_through_a_symlinked_parent(self):
         self.mk("real/file")
         os.symlink(os.path.join(self.fs, "real"), os.path.join(self.fs, "link"))
         p = os.path.join(self.fs, "link/file")
-        self.assertIn("symlink", tm.skip_reason(self.item(p), check_mount=False))
+        self.assertIn("symlink", fsops.skip_reason(self.item(p), check_mount=False))
 
     def test_not_a_mount_point(self):
         p = self.mk("a/file")
-        self.assertIn("mount", tm.skip_reason(self.item(p), check_mount=True))
+        self.assertIn("mount", fsops.skip_reason(self.item(p), check_mount=True))
 
 
 class Move(Fs):
     def test_file_keeps_its_path_under_dated_trash(self):
         p = self.mk("a/b/file.dat")
-        dest = tm.move_item(self.item(p), TODAY, check_mount=False)
+        dest = fsops.move_item(self.item(p), TODAY, check_mount=False)
         self.assertEqual(dest, os.path.join(self.fs, ".trash/2026-11-04/a/b/file.dat"))
         self.assertTrue(os.path.isfile(dest))
         self.assertFalse(os.path.exists(p))
@@ -148,7 +151,7 @@ class Move(Fs):
         self.mk("a/run1/x.txt", b"hello")
         self.mk("a/run1/sub/y.txt")
         before = os.stat(os.path.join(self.fs, "a/run1"))
-        dest = tm.move_item(self.item(os.path.join(self.fs, "a/run1")), TODAY, check_mount=False)
+        dest = fsops.move_item(self.item(os.path.join(self.fs, "a/run1")), TODAY, check_mount=False)
         self.assertEqual(dest, os.path.join(self.fs, ".trash/2026-11-04/a/run1"))
         self.assertFalse(os.path.exists(os.path.join(self.fs, "a/run1")))
         self.assertEqual(os.stat(dest).st_ino, before.st_ino)  # renamed, not copied
@@ -157,33 +160,19 @@ class Move(Fs):
         self.assertTrue(os.path.isfile(os.path.join(dest, "sub/y.txt")))
 
     def test_same_path_twice_a_day_gets_a_suffix(self):
-        first = tm.move_item(self.item(self.mk("a/f")), TODAY, check_mount=False)
-        second = tm.move_item(self.item(self.mk("a/f")), TODAY, check_mount=False)
+        first = fsops.move_item(self.item(self.mk("a/f")), TODAY, check_mount=False)
+        second = fsops.move_item(self.item(self.mk("a/f")), TODAY, check_mount=False)
         self.assertNotEqual(first, second)
         self.assertTrue(os.path.isfile(first) and os.path.isfile(second))
 
 
-class Purge(Fs):
-    def test_removes_only_dated_dirs_older_than_keep_days(self):
-        # TODAY is 2026-11-04: 10-04 is 31 days old (purged), 10-05 is 30 (kept).
-        for d in ["2026-09-01", "2026-10-04", "2026-10-05", "keep-me"]:
-            os.makedirs(os.path.join(self.fs, ".trash", d))
-        removed = tm.purge(self.fs, TODAY, keep_days=30)
-        self.assertEqual(sorted(os.path.basename(r) for r in removed), ["2026-09-01", "2026-10-04"])
-        self.assertEqual(sorted(os.listdir(os.path.join(self.fs, ".trash"))), ["2026-10-05", "keep-me"])
-
-    def test_no_trash_dir_is_fine(self):
-        self.assertEqual(tm.purge(self.fs, TODAY, keep_days=30), [])
-
-
 class State(unittest.TestCase):
-    def test_batches_are_saved_and_their_filesystems_remembered(self):
+    def test_batches_of_a_day_are_appended(self):
         with tempfile.TemporaryDirectory() as d:
             tm.save_batch(d, TODAY, [{"path": "/red/nas1/a", "fs": "/red/nas1"}])
-            tm.save_batch(d, TODAY, [{"path": "/red/nas2/b", "fs": "/red/nas2"}])
+            tm.save_batch(d, TODAY, [{"path": "/red/nas2/b", "fs": "/red/nas2", "action": "archive"}])
             with open(os.path.join(d, "2026-11-04.json")) as f:
-                self.assertEqual(len(json.load(f)), 2)  # same day: appended
-            self.assertEqual(tm.seen_filesystems(d), {"/red/nas1", "/red/nas2"})
+                self.assertEqual(len(json.load(f)), 2)
 
 
 class Claim(unittest.TestCase):
@@ -208,12 +197,12 @@ class Hardening(Fs):
         self.mk("projects/bob/data", b"victim")
         decoy = self.mk("alice/x/projects/mine", b"decoy")
         item = self.item(os.path.join(self.fs, "alice/x/projects"))
-        self.assertIsNone(tm.skip_reason(item, check_mount=False))
+        self.assertIsNone(fsops.skip_reason(item, check_mount=False))
         os.rename(os.path.join(self.fs, "alice/x"), os.path.join(self.fs, "alice/x.real"))
         os.symlink(self.fs, os.path.join(self.fs, "alice/x"))
         try:
-            tm.move_item(item, TODAY, check_mount=False)
-        except tm.Skip:
+            fsops.move_item(item, TODAY, check_mount=False)
+        except fsops.Skip:
             pass
         self.assertTrue(os.path.isfile(os.path.join(self.fs, "projects/bob/data")))
         del decoy
@@ -222,15 +211,15 @@ class Hardening(Fs):
         self.mk("projects/bob/data", b"victim")
         self.mk("alice/x/projects/mine", b"decoy")
         item = self.item(os.path.join(self.fs, "alice/x/projects"))
-        real_open_trash = tm.open_trash
+        real_open_trash = fsops.open_trash
 
         def swap_then_open(*a):
             os.rename(os.path.join(self.fs, "alice/x"), os.path.join(self.fs, "alice/x.real"))
             os.symlink(self.fs, os.path.join(self.fs, "alice/x"))
             return real_open_trash(*a)
 
-        with mock.patch.object(tm.fsops, "open_trash", swap_then_open):
-            dest = tm.move_item(item, TODAY, check_mount=False)
+        with mock.patch.object(fsops, "open_trash", swap_then_open):
+            dest = fsops.move_item(item, TODAY, check_mount=False)
         self.assertTrue(os.path.isfile(os.path.join(self.fs, "projects/bob/data")))
         self.assertFalse(os.path.exists(os.path.join(self.fs, "alice/x.real/projects")))
         self.assertTrue(dest.endswith("alice/x/projects"))
@@ -242,10 +231,8 @@ class Hardening(Fs):
         os.symlink(victim, os.path.join(self.fs, ".trash"))
         f = self.mk("a/file")
         with self.assertRaises(Exception):
-            tm.move_item(self.item(f), TODAY, check_mount=False)
+            fsops.move_item(self.item(f), TODAY, check_mount=False)
         self.assertTrue(os.path.isfile(f))
-        with self.assertRaises(Exception):
-            tm.purge(self.fs, TODAY, keep_days=30)
         self.assertTrue(os.path.isdir(os.path.join(victim, "2020-01-01")))
         self.assertEqual(os.stat(victim).st_mode & 0o777, 0o755)
 
@@ -255,22 +242,22 @@ class Hardening(Fs):
         try:
             pfd = os.open("a", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fsfd)
             st = os.stat("run1", dir_fd=pfd, follow_symlinks=False)
-            with self.assertRaises(tm.Skip) as cm:
-                tm.check_tree(pfd, "run1", st, os.geteuid() + 1, st.st_dev, "someone")
+            with self.assertRaises(fsops.Skip) as cm:
+                fsops.check_tree(pfd, "run1", st, os.geteuid() + 1, st.st_dev, "someone")
             self.assertIn("not owned", str(cm.exception))
-            tm.check_tree(pfd, "run1", st, os.geteuid(), st.st_dev, ME)  # own tree: fine
+            fsops.check_tree(pfd, "run1", st, os.geteuid(), st.st_dev, ME)  # own tree: fine
             os.close(pfd)
         finally:
             os.close(fsfd)
 
     def test_filesystem_allowlist(self):
         p = self.mk("a/file")
-        self.assertIn("--fs", tm.skip_reason(self.item(p), check_mount=False, allowed_fs={"/elsewhere"}))
-        self.assertIsNone(tm.skip_reason(self.item(p), check_mount=False, allowed_fs={self.fs}))
+        self.assertIn("--fs", fsops.skip_reason(self.item(p), check_mount=False, allowed_fs={"/elsewhere"}))
+        self.assertIsNone(fsops.skip_reason(self.item(p), check_mount=False, allowed_fs={self.fs}))
 
     def test_system_account_owners_are_refused(self):
         p = self.mk("a/file")
-        reason = tm.skip_reason(self.item(p), check_mount=False, min_uid=os.geteuid() + 1)
+        reason = fsops.skip_reason(self.item(p), check_mount=False, min_uid=os.geteuid() + 1)
         self.assertIn("system account", reason)
 
     def test_plain_http_needs_an_explicit_flag(self):
@@ -279,23 +266,25 @@ class Hardening(Fs):
 
 
 class EndToEnd(Fs):
-    def test_run_moves_batch_and_purges(self):
-        os.makedirs(os.path.join(self.fs, ".trash", "2026-01-01"))
+    def test_run_moves_each_item_where_its_action_says(self):
         f = self.mk("p/file")
         self.mk("p/dir/x")
+        self.mk("p/old/y")
         gone = self.item(self.fs + "/p/missing")
-        with tempfile.TemporaryDirectory() as state:
-            errors = tm.run(
-                [self.item(f), self.item(self.fs + "/p/dir"), gone],
-                today=TODAY, state_dir=state, keep_days=30,
-                purge_fs=[], check_mount=False,
-            )
-            self.assertEqual(errors, 0)
-            t = os.path.join(self.fs, ".trash/2026-11-04/p")
-            self.assertTrue(os.path.isfile(os.path.join(t, "file")))
-            self.assertTrue(os.path.isfile(os.path.join(t, "dir/x")))
-            self.assertFalse(os.path.exists(os.path.join(self.fs, ".trash/2026-01-01")))
+        archive = {**self.item(self.fs + "/p/old"), "action": "archive"}
+        errors = tm.run([self.item(f), self.item(self.fs + "/p/dir"), gone, archive],
+                        today=TODAY, check_mount=False)
+        self.assertEqual(errors, 0)
+        t = os.path.join(self.fs, ".trash/2026-11-04/p")
+        self.assertTrue(os.path.isfile(os.path.join(t, "file")))
+        self.assertTrue(os.path.isfile(os.path.join(t, "dir/x")))
+        self.assertTrue(os.path.isfile(os.path.join(self.fs, ".archive/p/old.2026-11-04/old/y")))
+        self.assertFalse(os.path.exists(self.fs + "/p/old"))
 
+    def test_unknown_action_is_an_error_and_stays(self):
+        f = self.mk("p/file")
+        self.assertEqual(tm.run([{**self.item(f), "action": "shred"}], TODAY, check_mount=False), 1)
+        self.assertTrue(os.path.isfile(f))
 
 
 def run_main(api, *args, env=None):
@@ -303,7 +292,7 @@ def run_main(api, *args, env=None):
     with tempfile.TemporaryDirectory() as home, \
             mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok", "HOME": home, **(env or {})}):
         rc = tm.main(["--api", api.url, *args])
-        state = os.path.join(home, ".dutopia-trash")
+        state = os.path.join(home, ".dutopia-mover")
         saved = sorted(os.listdir(state)) if os.path.isdir(state) else []
     return rc, saved
 
@@ -320,42 +309,34 @@ class Main(unittest.TestCase):
         self.assertEqual(tm.local_filesystems(["/", "/no/such/mount"], None, check_mount=True), ["/"])
         self.assertEqual(tm.local_filesystems(["/a", "/b"], {"/b"}, check_mount=False), ["/b"])
 
-    def test_fs_flag_narrows_the_claim(self):
+    def test_fs_flag_narrows_both_claims(self):
         with FakeApi(filesystems=["/red/nas1", "/red/nas2"]) as api:
             run_main(api, "--dev", "--fs", "/red/nas2")
-        self.assertIn("fs=%2Fred%2Fnas2", api.posts("/api/trash/claim")[0][1])
-        self.assertNotIn("nas1", api.posts("/api/trash/claim")[0][1])
+        paths = [r[1] for r in api.posts("/api/trash/claim")]
+        self.assertEqual(len(paths), 2)
+        self.assertIn("action=archive", paths[1])
+        for p in paths:
+            self.assertIn("fs=%2Fred%2Fnas2", p)
+            self.assertNotIn("nas1", p)
 
 
 class DryRun(Fs):
-    def test_dry_run_checks_but_moves_and_purges_nothing(self):
-        old = os.path.join(self.fs, ".trash", "2026-01-01")
-        os.makedirs(old)
+    def test_dry_run_checks_but_moves_nothing(self):
         f = self.mk("p/file")
         self.mk("p/dir/x")
-        with tempfile.TemporaryDirectory() as state:
-            errors = tm.run(
-                [self.item(f), self.item(self.fs + "/p/dir"), self.item(self.fs + "/p/gone")],
-                today=TODAY, state_dir=state, keep_days=30, purge_fs=[],
-                check_mount=False, dry_run=True,
-            )
+        archive = {**self.item(self.fs + "/p/dir"), "action": "archive"}
+        errors = tm.run([self.item(f), archive, self.item(self.fs + "/p/gone")],
+                        today=TODAY, check_mount=False, dry_run=True)
         self.assertEqual(errors, 0)
         self.assertTrue(os.path.isfile(f))
         self.assertTrue(os.path.isfile(self.fs + "/p/dir/x"))
-        self.assertTrue(os.path.isdir(old))
-        self.assertEqual(os.listdir(os.path.join(self.fs, ".trash")), ["2026-01-01"])
-
-    def test_purge_dry_run_lists_without_deleting(self):
-        os.makedirs(os.path.join(self.fs, ".trash", "2026-01-01"))
-        listed = tm.purge(self.fs, TODAY, keep_days=30, dry_run=True)
-        self.assertEqual([os.path.basename(p) for p in listed], ["2026-01-01"])
-        self.assertTrue(os.path.isdir(os.path.join(self.fs, ".trash", "2026-01-01")))
+        self.assertEqual(sorted(os.listdir(self.fs)), ["p"])
 
     def test_dry_run_claim_asks_the_server_not_to_remove(self):
         with FakeApi(filesystems=["/red/nas1"]) as api:
             rc, saved = run_main(api, "--dev", "--dry-run")
         self.assertEqual(rc, 0)
-        self.assertIn("dry_run=1", api.posts("/api/trash/claim")[0][1])
+        self.assertTrue(all("dry_run=1" in r[1] for r in api.posts("/api/trash/claim")))
         self.assertEqual(saved, [])  # nothing claimed, nothing to save
 
 
@@ -391,7 +372,8 @@ class Report(Fs):
         log = out.getvalue()
         self.assertIn(f"[ok] {f} -> ", log)
         self.assertIn(f"[skip] {self.fs}/p/gone: ", log)
-        self.assertEqual([r[1].split("?")[0] for r in api.requests if r[0] == "POST"], ["/api/trash/claim"])
+        self.assertEqual([r[1].split("?")[0] for r in api.requests if r[0] == "POST"],
+                         ["/api/trash/claim"] * 2)  # trash, then archive; nothing else
 
     def test_batch_rerun_moves_without_claiming(self):
         p = self.mk("p/file")
@@ -412,20 +394,29 @@ class Report(Fs):
         saved = [n for n in os.listdir(self.state) if n.endswith(".json")]
         self.assertEqual(len(saved), 1, "the items it really claimed are saved for --batch")
 
-    def test_old_server_ignoring_the_fs_filter_still_runs(self):
+    def test_old_server_still_moves_the_trash_but_never_claims_the_archive(self):
         p = self.mk("p/file")
-        with FakeApi(filesystems=[self.fs], items=[self.item(p)], honor=False) as api:
-            self.assertEqual(self._main(api), 0)
+        out = io.StringIO()
+        with FakeApi(filesystems=[self.fs], items=[self.item(p)], honor=False) as api, \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(self._main(api), 1)  # flagged: upgrade duapi
         self.assertFalse(os.path.exists(p))
+        self.assertEqual(len(api.posts("/api/trash/claim")), 1)
+        self.assertIn("no archive queue", out.getvalue())
 
-    def test_unreachable_api_still_purges_known_filesystems(self):
-        old = os.path.join(self.fs, ".trash", "2020-01-01")
-        os.makedirs(old)
-        tm.save_batch(self.state, datetime.date(2020, 1, 1), [self.item(self.fs + "/x")])
+    def test_claims_the_archive_and_moves_it_aside(self):
+        self.mk("p/dir/x")
+        items = [{**self.item(self.fs + "/p/dir"), "action": "archive"}]
+        with FakeApi(filesystems=[self.fs], items=items) as api:
+            self.assertEqual(self._main(api), 0)
+        day = datetime.date.today().isoformat()
+        self.assertTrue(os.path.isfile(os.path.join(self.fs, ".archive/p", f"dir.{day}", "dir/x")))
+        self.assertFalse(os.path.exists(self.fs + "/p/dir"))
+
+    def test_unreachable_api_is_an_error(self):
         with mock.patch.dict(os.environ, {"TRASH_TOKEN": "tok"}):
             rc = tm.main(["--api", "http://127.0.0.1:9", "--dev", "--state-dir", self.state])
         self.assertEqual(rc, 1)
-        self.assertFalse(os.path.exists(old))
 
     def test_fs_flag_matching_no_server_filesystem_is_an_error(self):
         with FakeApi(filesystems=[self.fs]) as api:
@@ -453,62 +444,11 @@ class Report(Fs):
         self.assertFalse(os.path.exists(p))  # but the claimed item was moved
 
 
-
-class Modes(Fs):
-    """`move`, `purge` (default: both), and the purge age taken from the server."""
-
-    def setUp(self):
-        super().setUp()
-        self._st = tempfile.TemporaryDirectory()
-        self.state = self._st.name
-        today = datetime.date.today()
-        self.old = os.path.join(self.fs, ".trash", (today - datetime.timedelta(days=3)).isoformat())
-        os.makedirs(self.old)
-
-    def tearDown(self):
-        self._st.cleanup()
-        super().tearDown()
-
-    def _main(self, *args, token="tok"):
-        env = {"TRASH_TOKEN": token} if token else {}
-        with mock.patch.dict(os.environ, env):
-            if not token:
-                os.environ.pop("TRASH_TOKEN", None)
-            return tm.main(["--dev", "--state-dir", self.state, *args])
-
-    def test_keep_days_come_from_the_server(self):
-        with FakeApi(filesystems=[self.fs], keep_days=1) as api:
-            self.assertEqual(self._main("--api", api.url), 0)
-        self.assertFalse(os.path.exists(self.old))  # 3 days old > the server's 1
-
-    def test_keep_days_flag_overrides_the_server(self):
-        with FakeApi(filesystems=[self.fs], keep_days=1) as api:
-            self.assertEqual(self._main("--api", api.url, "--keep-days", "30"), 0)
-        self.assertTrue(os.path.isdir(self.old))
-
-    def test_move_only_does_not_purge(self):
-        f = self.mk("p/file")
-        with FakeApi(filesystems=[self.fs], items=[self.item(f)], keep_days=1) as api:
-            self.assertEqual(self._main("move", "--api", api.url), 0)
-        self.assertFalse(os.path.exists(f))
-        self.assertTrue(os.path.isdir(self.old))
-
-    def test_purge_only_claims_nothing_and_needs_no_token(self):
-        with FakeApi(filesystems=[self.fs], items=[self.item(self.mk("p/file"))], keep_days=1) as api:
-            self.assertEqual(self._main("purge", "--api", api.url, token=None), 0)
-        self.assertEqual(api.posts("/api/trash/claim"), [])
-        self.assertTrue(os.path.isfile(self.fs + "/p/file"))
-        self.assertFalse(os.path.exists(self.old))
-
-    def test_purge_only_without_an_api(self):
-        rc = self._main("purge", "--fs", self.fs, "--keep-days", "1", token=None)
-        self.assertEqual(rc, 0)
-        self.assertFalse(os.path.exists(self.old))
-
-    def test_unknown_command_and_removed_flags_are_refused(self):
-        for args in (["clean"], ["--purge-only"], ["--allow-http"], ["--min-uid", "0"]):
-            with self.assertRaises(SystemExit, msg=args):
-                self._main(*args)
+class Flags(unittest.TestCase):
+    def test_removed_commands_and_flags_are_refused(self):
+        for args in (["move"], ["purge"], ["--keep-days", "7"], ["--allow-http"], ["--min-uid", "0"]):
+            with self.assertRaises(SystemExit, msg=args), contextlib.redirect_stderr(io.StringIO()):
+                tm.main(["--dev", "--api", "http://x", *args])
 
 
 if __name__ == "__main__":

@@ -7,10 +7,11 @@
 //   UI Keep       → DELETE /api/trash?path=    removes it (the 1-day undo)
 //   UI panel      → GET    /api/trash          entries the caller may manage
 //   cron 02:00    → POST   /api/trash/claim    (Bearer $TRASH_TOKEN) entries
-//                    queued over 24h ago, removed from the queue; the trash
-//                    cron moves them to <fs>/.trash/<date>/… and purges later,
-//                    the archive cron (?action=archive) packs them into
-//                    <fs>/.archive/<path>.<date>.tar.gz and keeps them.
+//                    queued over 24h ago, removed from the queue;
+//                    script/mover.py claims the trash's, then the archive's
+//                    (?action=archive), and renames them into
+//                    <fs>/.trash/<date>/… or <fs>/.archive/<path>.<date>/…
+//                    (script/archiver.py packs those by hand later).
 //
 // The queue is `$TRASH_DIR/queue.json` (trash_store.rs). It holds only what
 // waits: once claimed or kept, an item is gone from it.
@@ -35,12 +36,12 @@ pub use crate::trash_store::save;
 pub use crate::trash_store::{load, trash_dir};
 use crate::trash_store::with_queue;
 
-/// Default days a moved item stays in `<fs>/.trash` before the cron purges it.
+/// Default days a moved item stays in `<fs>/.trash` before it is deleted.
 pub const DEFAULT_KEEP_DAYS: i64 = 30;
 
-/// `TRASH_KEEP_DAYS` (default 30): how long moved items stay in .trash. The
-/// cron purges with it (from /api/health) unless given `--keep-days`, and
-/// the UI and the Notify email quote it.
+/// `TRASH_KEEP_DAYS` (default 30): how long moved items stay in .trash
+/// before the admin deletes them by hand (deploy/TRASH.md); the UI and the
+/// Notify email quote it.
 pub fn keep_days() -> i64 {
     std::env::var("TRASH_KEEP_DAYS")
         .ok()
@@ -66,8 +67,8 @@ pub fn undo_hours() -> i64 {
 /// Bound on queue.json so a runaway client cannot grow it without limit.
 const MAX_ENTRIES: usize = 20_000;
 
-/// What the cron does with a queued item: move it to `<fs>/.trash` (purged
-/// after `keep_days`) or pack it into `<fs>/.archive` (kept). Entries saved
+/// What the cron does with a queued item: move it to `<fs>/.trash` (deleted
+/// after `keep_days`) or to `<fs>/.archive` (kept, packed later). Entries saved
 /// before archiving existed have no action: they are trash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

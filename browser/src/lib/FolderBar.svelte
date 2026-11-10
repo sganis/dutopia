@@ -4,6 +4,7 @@
   import { humanBytes, humanCount, humanTime, isWindows } from "../ts/util";
   import ActionBar from "./ActionBar.svelte";
   import type { TrashAction } from "../ts/models";
+  import { groupSmallUsers, MANY_COLOR, MANY_USERS } from "../ts/manyusers";
 
   type UserStatsJson = {
     username: string;
@@ -131,24 +132,38 @@
     return keys.length === 1 ? keys[0] : null;
   });
   const allowed = $derived(!!singleOwner && (canDelete?.(folder.path, singleOwner) ?? true));
+
+  // Users too thin to see merge into one light "Many Users" segment (first,
+  // as the smallest); `lightW` is its width in % of the row, where the text
+  // turns dark.
+  let rowW = $state(0);
+  const segments = $derived.by(() => {
+    const total = toNum(
+      sortBy === "disk" ? folder.total_disk : sortBy === "size" ? folder.total_size : folder.total_count,
+    );
+    const barPx = (rowW * widthPercent) / 100;
+    return groupSmallUsers(sortedUserEntries(folder), userMetricFor, total, barPx).map(([uname, userData]) => ({
+      uname,
+      userData,
+      userPercent: total > 0 ? (userMetricFor(userData) / total) * 100 : 0,
+    }));
+  });
+  const lightW = $derived(segments[0]?.uname === MANY_USERS ? (widthPercent * segments[0].userPercent) / 100 : 0);
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="relative px-2 py-1 cursor-pointer hover:opacity-95 bg-gray-700 border border-gray-500 rounded-lg overflow-hidden min-h-16"
+  class="relative px-2 py-1 cursor-pointer hover:opacity-95 bg-gray-700 rounded-lg overflow-hidden min-h-16"
   onclick={onclick}
+  bind:clientWidth={rowW}
 >
   <!-- Folder bar background -->
   <div class="absolute left-0 top-0 bottom-0 flex z-0" style="width: {widthPercent}%">
-    {#each sortedUserEntries(folder) as [uname, userData]}
-      {@const userMetric = sortBy === "disk" ? userData.disk : sortBy === "size" ? userData.size : userData.count}
-      {@const totalMetric =
-        sortBy === "disk" ? folder.total_disk : sortBy === "size" ? folder.total_size : folder.total_count}
-      {@const userPercent = totalMetric > 0 ? (userMetric / totalMetric) * 100 : 0}
+    {#each segments as { uname, userData, userPercent } (uname)}
       <div
         class="h-full transition-all duration-300 min-w-[0.5px] hover:opacity-90"
-        style="width: {userPercent}%; background-color: {userColors.get(uname)};"
+        style="width: {userPercent}%; background-color: {uname === MANY_USERS ? MANY_COLOR : userColors.get(uname)};"
         onmouseenter={(e) => onUserHover?.(e, userData, userPercent)}
         onmousemove={onUserMove}
         onmouseleave={onUserLeave}
@@ -156,8 +171,7 @@
       ></div>
     {/each}
   </div>
-  <!-- Folder bar foreground -->
-  <div class="relative flex flex-col gap-2 z-10 pointer-events-none">
+  {#snippet content()}
     <div class="flex items-center justify-between gap-4">
       <div class="w-full overflow-hidden text-ellipsis whitespace-nowrap">
         <div>{folder.path}</div>
@@ -182,5 +196,23 @@
         {/if}
       </p>
     </div>
+  {/snippet}
+  <!-- Folder bar foreground -->
+  <div class="relative flex flex-col gap-2 z-10 pointer-events-none">
+    {@render content()}
   </div>
+  <!-- Dark copy of the foreground, clipped to the light "Many Users" zone -->
+  {#if lightW > 0}
+    <div
+      class="absolute inset-0 px-2 py-1 flex flex-col gap-2 z-20 pointer-events-none text-gray-900"
+      style="clip-path: inset(0 {100 - lightW}% 0 0)"
+      inert
+      aria-hidden="true"
+    >
+      {@render content()}
+    </div>
+  {/if}
+  <!-- Rim drawn on top and translucent (not a border): a light segment
+       reaches the edge instead of looking inset by a dark frame. -->
+  <div class="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/25 z-30 pointer-events-none"></div>
 </div>

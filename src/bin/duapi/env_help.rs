@@ -68,10 +68,10 @@ Filesystems and trash:
   TRASH_UNDO_HOURS        Hours an item waits in the queue before the cron
                           may take it, i.e. the Keep window (default: 24;
                           0 for local testing)
-  TRASH_KEEP_DAYS         Days moved items stay in <fs>/.trash before the cron
-                          purges them (default: 30). The cron reads it from
-                          /api/health unless given --keep-days.
-  TRASH_TOKEN             Bearer token the trash cron sends to
+  TRASH_KEEP_DAYS         Days moved items stay in <fs>/.trash before they
+                          are deleted by hand (default: 30); the UI and the
+                          Notify email quote it.
+  TRASH_TOKEN             Bearer token the mover cron sends to
                           POST /api/trash/claim. Claim is refused when unset.
 
 Request limits:
