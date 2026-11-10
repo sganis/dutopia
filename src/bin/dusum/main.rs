@@ -8,10 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 mod aggregate;
+mod inodedup;
 mod output;
 mod stats;
 
 use aggregate::{get_folder_ancestors, normalize_folder_bytes, resolve_user};
+use inodedup::InodeDedup;
 use output::{count_lines, write_results, write_unknown_uids};
 use stats::{age_bucket, parse_age_pair, sanitize_mtime, AgeCfg, UserStats};
 
@@ -94,7 +96,13 @@ fn main() -> Result<()> {
     };
 
     let now_ts = Utc::now().timestamp();
-    let mut seen_inodes: HashSet<Vec<u8>> = HashSet::new();
+    // Pre-sized flat fingerprint table: ~10 GB at the billion-file mark
+    // versus 60+ GB for the old HashSet<Vec<u8>> of inode strings.
+    let mut seen_inodes = InodeDedup::with_expected(data_lines);
+    println!(
+        "Dedup memory : {:.1} GB reserved",
+        seen_inodes.footprint() as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
 
     for (index, record_result) in reader.byte_records().enumerate() {
         let record = match record_result {
@@ -105,11 +113,11 @@ fn main() -> Result<()> {
             }
         };
 
-        let inode_bytes = record.get(0).unwrap_or(b"").to_vec();
+        let inode_bytes = record.get(0).unwrap_or(b"");
         // Sentinel "0-0" means the scanner had no inode info (Windows).
         // Treat every such row as a distinct file so the hardlink-dedup below
         // does not collapse all but the first row into linked_size.
-        let has_inode = inode_bytes.as_slice() != b"0-0" && !inode_bytes.is_empty();
+        let has_inode = inode_bytes != b"0-0" && !inode_bytes.is_empty();
         let mode = parse_int::<u32>(record.get(5));
         let is_dir = (mode & S_IFMT) == S_IFDIR;
         let raw_atime = parse_int::<i64>(record.get(1));
@@ -128,9 +136,7 @@ fn main() -> Result<()> {
         let file_size = parse_int::<u64>(record.get(6));
         let raw_disk = parse_int::<u64>(record.get(7));
 
-        let (disk_size, linked_size) = if !has_inode {
-            (raw_disk, 0)
-        } else if seen_inodes.insert(inode_bytes) {
+        let (disk_size, linked_size) = if !has_inode || seen_inodes.insert_seen(inode_bytes) {
             (raw_disk, 0)
         } else {
             (0, raw_disk)

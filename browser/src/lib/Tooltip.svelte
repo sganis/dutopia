@@ -25,7 +25,7 @@
   >
     <div
       bind:this={bubbleEl}
-      class="relative rounded-xl border border-white/10 bg-black/90 text-white shadow-xl px-3 py-2"
+      class="relative rounded-xl border border-gray-600 bg-gray-800 text-white shadow-xl px-3 py-2"
     >
       <div class="flex items-center justify-center">
         <div class="font-medium text-sm truncate max-w-[180px]">{tip.username}</div>
@@ -35,7 +35,7 @@
         <div class="">{tip.percent}%</div>
       </div>
       <div class="absolute left-1/2 top-full -translate-x-1/2 mt-[-4px]">
-        <div class="w-2 h-2 rotate-45 bg-black/90 border border-white/10 border-l-0 border-t-0"></div>
+        <div class="w-2 h-2 rotate-45 bg-gray-800 border border-gray-600 border-l-0 border-t-0"></div>
       </div>
     </div>
   </div>

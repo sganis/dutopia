@@ -71,7 +71,7 @@
     closeAfterSelect={true}
     deselectMode="native"
     virtualList={true}
-    class="z-20 min-w-40 h-10 border rounded border-gray-500 bg-gray-800 text-white"
+    class="z-40 min-w-40 h-10 border rounded border-gray-500 bg-gray-800 text-white"
   />
   {#if !selectedUser || selectedUser === "All Users"}
     <button class="btn" disabled={true}>

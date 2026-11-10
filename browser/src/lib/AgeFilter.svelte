@@ -59,7 +59,7 @@
   {#if ageOpen}
     <div
       class="flex flex-col divide-y divide-gray-500 absolute w-48 rounded border
-       border-gray-500 bg-gray-800 shadow-lg z-20 overflow-hidden mt-0.5"
+       border-gray-500 bg-gray-800 shadow-lg z-40 overflow-hidden mt-0.5"
     >
       <button class="w-full text-left px-3 py-2 hover:bg-gray-700" onclick={() => chooseAge(-1)}>
         Any Time

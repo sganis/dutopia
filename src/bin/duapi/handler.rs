@@ -42,8 +42,57 @@ pub async fn health_handler() -> impl IntoResponse {
         "filesystems": crate::filesystems(),
         "trash_undo_hours": crate::trash::undo_hours(),
         "trash_keep_days": crate::trash::keep_days(),
+        "many_users_px": many_users_px(),
+        "many_users_color": many_users_color(),
+        "bar_empty_color": bar_empty_color(),
         "archive": true,
     }))
+}
+
+/// Default width (px) under which a user's bar segment merges into the
+/// "Many Users" block on the SPA. 0 disables grouping.
+pub const DEFAULT_MANY_USERS_PX: f64 = 2.0;
+
+/// `MANY_USERS_PX` (default 2): threshold in pixels below which the SPA
+/// groups thin user segments into one "Many Users" block. 0 groups nothing.
+pub fn many_users_px() -> f64 {
+    std::env::var("MANY_USERS_PX")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|px| *px >= 0.0)
+        .unwrap_or(DEFAULT_MANY_USERS_PX)
+}
+
+/// Fallback color of the "Many Users" block on the SPA.
+pub const DEFAULT_MANY_USERS_COLOR: &str = "#D2CCBC";
+
+/// `MANY_USERS_COLOR` (default `#D2CCBC`, bone): color of the "Many Users"
+/// block on the SPA. Only `#RRGGBB` is accepted — the value ends up in a
+/// `style="background-color: …"`, so free text would be a CSS injection.
+pub fn many_users_color() -> String {
+    std::env::var("MANY_USERS_COLOR")
+        .ok()
+        .filter(|c| {
+            let b = c.as_bytes();
+            b.len() == 7 && b[0] == b'#' && b[1..].iter().all(|c| c.is_ascii_hexdigit())
+        })
+        .unwrap_or_else(|| DEFAULT_MANY_USERS_COLOR.to_string())
+}
+
+/// Default background of the empty part of the stat bars on the SPA.
+pub const DEFAULT_BAR_EMPTY_COLOR: &str = "#262626";
+
+/// `BAR_EMPTY_COLOR` (default `#262626`, dark gray): background of the
+/// unfilled part of the stat bars. Only `#RRGGBB` is accepted, like
+/// `MANY_USERS_COLOR` — the value ends up in inline CSS.
+pub fn bar_empty_color() -> String {
+    std::env::var("BAR_EMPTY_COLOR")
+        .ok()
+        .filter(|c| {
+            let b = c.as_bytes();
+            b.len() == 7 && b[0] == b'#' && b[1..].iter().all(|c| c.is_ascii_hexdigit())
+        })
+        .unwrap_or_else(|| DEFAULT_BAR_EMPTY_COLOR.to_string())
 }
 
 /// POST /api/login

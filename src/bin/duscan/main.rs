@@ -319,7 +319,19 @@ fn main() -> Result<()> {
 
     // ---- merge shards ----
     let sort_csv = args.no_atime && matches!(out_fmt, OutputFormat::Csv);
+    if !args.quiet {
+        print!(
+            "Merging shards : {} worker outputs into final file",
+            workers
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+    let merge_start = Instant::now();
     merge_shards(&out_dir, &final_path, workers, out_fmt, sort_csv, pid)?;
+    if !args.quiet {
+        println!(" done ({})", format_duration(merge_start.elapsed()));
+    }
 
     if let Some(h) = reporter_join.take() {
         reporting_done.store(true, Relaxed);
@@ -328,7 +340,7 @@ fn main() -> Result<()> {
 
     let elapsed_str = format_duration(start_time.elapsed());
 
-    println!("\rTotal files  : {}", total.files);
+    println!("Total files  : {}", total.files);
     println!("Total errors : {}", total.errors);
     println!("Total disk   : {}", human_bytes(total.bytes));
     println!("Elapsed time : {}", elapsed_str);

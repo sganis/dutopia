@@ -114,7 +114,7 @@
             border-gray-500 bg-gray-800 rounded-lg shadow-lg ">
             {#if mode === 'oidc'}
                 <button class="btn w-full" type="button" onclick={onOidcLogin}>
-                    Sign in with Keycloak
+                    Sign in with SSO
                 </button>
             {:else}
             <form class="space-y-4 w-full" onsubmit={onSubmit}>

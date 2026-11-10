@@ -127,47 +127,52 @@ export function matchOption<T>(
 //   "#22D3EE","#059669","#D946EF","#F43F3F","#E11D48","#FB7185","#111827",
 // ];
 
-// Dark + Vivid Palette for Black Backgrounds
+// Dark + Vivid Palette for gray-700 (#374151) bar backgrounds.
+// Every slot is inside the OKLCH lightness band L 0.48-0.67 with chroma
+// >= 0.10, so no color reads as gray against the empty bar space (the
+// old "extra deep" tiers like #5A1E1E merged into the background).
+// Tier 1 passes all adjacency checks; deeper tiers trade adjacency for
+// band compliance and lean on the 2px segment gaps + tooltips.
 export const COLORS = [
-  // Tier 1: Strong primaries
-  '#C53030', // Dark Red
-  '#2F855A', // Deep Green
-  '#2B6CB0', // Deep Blue
-  '#B7791F', // Dark Gold
-  '#6B46C1', // Dark Purple
-  '#C05621', // Burnt Orange
-  '#2C7A7B', // Dark Teal
-  '#C2185B', // Vivid Magenta
+  // Tier 1: Strong primaries (validated as a full adjacent sequence)
+  '#DC2626', // Red
+  '#15803D', // Green
+  '#2563EB', // Blue
+  '#C2842A', // Gold
+  '#7C3AED', // Purple
+  '#EA580C', // Orange
+  '#0891B2', // Teal
+  '#DB2777', // Magenta
 
-  // Tier 2: Secondary strongs
-  '#22543D', // Forest Green
-  '#1A365D', // Navy
-  '#97266D', // Hot Pink / Fuchsia
-  '#9C4221', // Rust Red
-  '#44337A', // Indigo
-  '#00838F', // Cyan/Teal
-  '#D35400', // Orange Red
-  '#0891B2', // Sky Cyan
+  // Tier 2: Second steps of the same hues
+  '#B91C1C', // Darker Red
+  '#1A7F44', // Darker Green
+  '#3B82F6', // Lighter Blue
+  '#9A7B1A', // Darker Gold
+  '#9333EA', // Violet
+  '#C2410C', // Burnt Orange
+  '#0B8FA6', // Darker Teal
+  '#C026D3', // Fuchsia
 
-  // Tier 3: Mid-dark variants (still visible with white text)
-  '#276749', // Medium-Dark Green
-  '#1E40AF', // Medium-Dark Blue
-  '#9B2C2C', // Medium-Dark Crimson
-  '#553C9A', // Deep Indigo
-  '#115E59', // Teal Shade
-  '#9F1239', // Deep Pinkish Red
-  '#A16207', // Dark Amber
-  '#0F766E', // Deep Aquamarine
+  // Tier 3: Third steps
+  '#E11D48', // Rose
+  '#22A05A', // Brighter Green
+  '#4F46E5', // Indigo
+  '#B8860B', // Dark Goldenrod
+  '#8B5CF6', // Lighter Purple
+  '#D97706', // Amber
+  '#0EA5C4', // Cyan
+  '#EC4899', // Pink
 
-  // Tier 4: Extra deep anchors
-  '#742A2A', // Very Dark Red
-  '#234E52', // Very Dark Teal
-  '#312E81', // Very Dark Indigo
-  '#5A1E1E', // Brick
-  '#513C06', // Dark Mustard
-  '#3C096C', // Royal Violet
-  '#7C2D12', // Ember
-  '#14532D', // Pine Green
+  // Tier 4: Fourth steps
+  '#B3134B', // Deep Rose
+  '#1E8A50', // Emerald
+  '#1D4ED8', // Deep Blue
+  '#8A6410', // Bronze
+  '#6D28D9', // Deep Violet
+  '#E65100', // Vivid Orange
+  '#0F8DB0', // Blue Teal
+  '#A21CAF', // Deep Fuchsia
 ];
 
 // Smart color assignment function
@@ -206,10 +211,12 @@ export const getOptimalColors = (numUsers) => {
     const cycle = Math.floor(i / COLORS.length);
     let color = COLORS[baseIndex];
 
-    // Apply slight modifications for cycles
+    // Apply slight modifications for cycles. Keep lightness inside the
+    // dark-surface band (0.35-0.60): pastels above it vanish against the
+    // gray-700 bars and carry near-white text illegibly.
     if (cycle > 0) {
       const hsl = hexToHsl(color);
-      hsl.l = Math.max(0.2, Math.min(0.8, hsl.l + (cycle * 0.15 * (i % 2 === 0 ? 1 : -1))));
+      hsl.l = Math.max(0.35, Math.min(0.6, hsl.l + (cycle * 0.15 * (i % 2 === 0 ? 1 : -1))));
       color = hslToHex(hsl);
     }
 

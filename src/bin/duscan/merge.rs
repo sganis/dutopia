@@ -55,7 +55,7 @@ fn merge_shards_csv(
         return Ok(());
     }
 
-    // Sorted mode (only used when --skip-atime and CSV)
+    // Sorted mode (only used when --no-atime and CSV)
     let mut lines: Vec<String> = Vec::new();
 
     for tid in 0..threads {

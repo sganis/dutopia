@@ -78,8 +78,8 @@ was trashed yesterday.
 ## If something goes wrong
 
 - **What happened to an item:** the log, one line per item (`ok`, `skip` or
-  `err`); the claimed batch is in `/var/lib/dutopia-mover/<date>.json`.
-- **A run died halfway:** `... mover.py $T --batch /var/lib/dutopia-mover/<date>.json`
+  `err`); the claimed batch is in `/root/.dutopia-mover/<date>.json`.
+- **A run died halfway:** `... mover.py $T --batch /root/.dutopia-mover/<date>.json`
   (what was already moved is skipped as gone).
 - **401:** the token file differs from the pod's `TRASH_TOKEN`.
 - **Private CA:** add `--cafile /path/to/ca.pem`.
@@ -107,8 +107,11 @@ turns off the owner checks). Restore stays with whoever has root.
 ## Local test
 
 ```bash
-TRASH_TOKEN=x python3 script/mover.py --dev --api http://localhost:18088
-python3 script/archiver.py --dev --fs <dir>
+TRASH_TOKEN=x python3 script/mover.py --dev --api http://localhost:18088 --output ~/dutopia-out
+python3 script/archiver.py --dev --fs <dir> --output ~/dutopia-out
 ```
 
 with duapi started with `FILESYSTEMS=<dirs> TRASH_TOKEN=x TRASH_UNDO_HOURS=0`.
+`--output` keeps `.trash` and `.archive` under that folder (one subfolder
+per filesystem) instead of the filesystems themselves: nothing is written
+where the scan looks, so the whole flow runs as a normal user.

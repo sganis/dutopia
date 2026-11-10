@@ -717,7 +717,7 @@
 </script>
 
 <div class="flex flex-col h-screen min-h-0 gap-2 p-2">
-  <div class="flex gap-2 items-center relative select-none">
+  <div class="flex gap-2 items-center relative select-none shrink-0">
     <button class="btn" onclick={goHome} title="Go to Root Folder" disabled={fullPath === ""}>
       <div class="flex items-center">
         <span class="material-symbols-outlined">home</span>
@@ -759,7 +759,7 @@
       closeAfterSelect={true}
       deselectMode="native"
       virtualList={true}
-      class="z-20 grow min-w-40 h-10 border rounded border-gray-500 bg-gray-800 text-white"
+      class="z-40 grow min-w-40 h-10 border rounded border-gray-500 bg-gray-800 text-white"
     />
     {#if !selectedUser || selectedUser === "All Users"}
       <button class="btn" disabled={true}>
@@ -819,7 +819,7 @@
       </button>
     {/if}
   </div>
-  <div class="flex">
+  <div class="flex shrink-0">
     <input
       bind:this={pathInput}
       bind:value={path}
@@ -860,7 +860,7 @@
       </div>
     </div>
   {:else if loading}
-    <div class="flex flex-col gap-2 overflow-y-auto">
+    <div class="flex flex-col gap-2 overflow-y-auto min-h-0">
       {#each Array(6) as _, i}
         <div class="relative p-3 bg-gray-800 border border-gray-500 rounded-lg animate-pulse min-h-16 h-16">
           <div class="flex items-center justify-between gap-4">
@@ -876,7 +876,7 @@
       {/each}
     </div>
   {:else}
-    <div class="flex flex-col gap-2 overflow-y-auto transition-opacity duration-200 p-4">
+    <div class="flex flex-col gap-2 overflow-y-auto transition-opacity duration-200 p-4 min-h-0">
       {#if __DESKTOP__ && sortedFolders.length === 0 && sortedfiles.length === 0 && path === ""}
         <div class="flex flex-col items-center justify-center text-center text-gray-300 py-16 gap-3">
           <span class="material-symbols-outlined text-6xl opacity-50">travel_explore</span>

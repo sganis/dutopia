@@ -252,12 +252,6 @@ fn parse_u32(b: &[u8]) -> Option<u32> {
     atoi::atoi::<u32>(b)
 }
 
-/// Parse a u64 inode; None on malformed.
-#[inline]
-fn parse_u64(b: &[u8]) -> Option<u64> {
-    atoi::atoi::<u64>(b)
-}
-
 /// True if the line needs RFC-4180 unquoting (contains a double quote).
 #[inline]
 fn needs_unquote(line: &[u8]) -> bool {

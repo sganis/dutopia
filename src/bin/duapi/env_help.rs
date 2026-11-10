@@ -79,6 +79,15 @@ Request limits:
   MAX_BODY_BYTES          Max request body size in bytes (default: 65536)
   MAX_PAGE_SIZE           Max rows per /api/files page (default: 2000)
 
+UI:
+  MANY_USERS_PX           Width in pixels under which the SPA merges thin
+                          user segments into one "Many Users" block
+                          (default: 2; 0 disables grouping)
+  MANY_USERS_COLOR        Color of that block, #RRGGBB only (default:
+                          #D2CCBC)
+  BAR_EMPTY_COLOR         Background of the unfilled part of the bars,
+                          #RRGGBB only (default: #262626)
+
 Email notifications (POST /api/cleanup/notify; disabled unless all are set):
   SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
   SMTP_PORT               SMTP port (default: 587)

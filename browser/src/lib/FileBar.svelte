@@ -4,6 +4,7 @@
   import { humanBytes, humanTime } from "../ts/util";
   import ActionBar from "./ActionBar.svelte";
   import type { TrashAction } from "../ts/models";
+  import { api } from "$api";
 
   type ScannedFile = {
     path: string;
@@ -61,8 +62,8 @@
 
 <div class="flex">
   <span class="material-symbols-outlined text-4xl">subdirectory_arrow_right</span>
-  <div class="relative flex grow px-2 py-1 bg-gray-700 border border-gray-500 rounded overflow-hidden text-xs">
-    <div class="flex flex-col w-full">
+  <div class="relative flex grow px-2 py-1 border border-gray-500 rounded-lg overflow-hidden text-xs" style="background-color: {api.barEmptyColor}">
+    <div class="flex flex-col w-full bar-text">
       <!-- File bar background -->
       <div
         class="absolute left-0 top-0 bottom-0 z-0 opacity-60"

@@ -118,6 +118,10 @@ class Api {
   public filesystems: string[] = [];
   public trashUndoHours: number = 24;
   public trashKeepDays: number = 30;
+  /** No /api/health on desktop: the SPA defaults apply. */
+  public manyUsersPx: number = 2;
+  public manyUsersColor: string = "#D2CCBC";
+  public barEmptyColor: string = "#262626";
   async trashList(): Promise<TrashEntry[]> { throw new Error(WEB_ONLY); }
   async trashAdd(_path: string, _size: number, _owner: string, _action?: TrashAction): Promise<TrashEntry> {
     throw new Error(WEB_ONLY);

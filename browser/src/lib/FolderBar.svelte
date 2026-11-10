@@ -2,9 +2,10 @@
 <script lang="ts">
   import type { SvelteMap } from "svelte/reactivity";
   import { humanBytes, humanCount, humanTime, isWindows } from "../ts/util";
+  import { groupSmallUsers, MANY_USERS } from "../ts/manyusers";
+  import { api } from "$api";
   import ActionBar from "./ActionBar.svelte";
   import type { TrashAction } from "../ts/models";
-  import { groupSmallUsers, MANY_COLOR, MANY_USERS } from "../ts/manyusers";
 
   type UserStatsJson = {
     username: string;
@@ -142,7 +143,7 @@
       sortBy === "disk" ? folder.total_disk : sortBy === "size" ? folder.total_size : folder.total_count,
     );
     const barPx = (rowW * widthPercent) / 100;
-    return groupSmallUsers(sortedUserEntries(folder), userMetricFor, total, barPx).map(([uname, userData]) => ({
+    return groupSmallUsers(sortedUserEntries(folder), userMetricFor, total, barPx, api.manyUsersPx).map(([uname, userData]) => ({
       uname,
       userData,
       userPercent: total > 0 ? (userMetricFor(userData) / total) * 100 : 0,
@@ -154,7 +155,8 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="relative px-2 py-1 cursor-pointer hover:opacity-95 bg-gray-700 rounded-lg overflow-hidden min-h-16"
+  class="relative px-2 py-1 cursor-pointer hover:opacity-95 rounded-lg overflow-hidden min-h-16"
+  style="background-color: {api.barEmptyColor}"
   onclick={onclick}
   bind:clientWidth={rowW}
 >
@@ -162,8 +164,8 @@
   <div class="absolute left-0 top-0 bottom-0 flex z-0" style="width: {widthPercent}%">
     {#each segments as { uname, userData, userPercent } (uname)}
       <div
-        class="h-full transition-all duration-300 min-w-[0.5px] hover:opacity-90"
-        style="width: {userPercent}%; background-color: {uname === MANY_USERS ? MANY_COLOR : userColors.get(uname)};"
+        class="h-full transition-all duration-300 min-w-[0.5px] hover:opacity-90 border-r border-r-gray-600 last:border-r-0"
+        style="width: {userPercent}%; background-color: {uname === MANY_USERS ? api.manyUsersColor : userColors.get(uname)};"
         onmouseenter={(e) => onUserHover?.(e, userData, userPercent)}
         onmousemove={onUserMove}
         onmouseleave={onUserLeave}
@@ -197,8 +199,13 @@
       </p>
     </div>
   {/snippet}
-  <!-- Folder bar foreground -->
-  <div class="relative flex flex-col gap-2 z-10 pointer-events-none">
+  <!-- Folder bar foreground. Clipped to exclude the light zone: the dark
+       copy there must sit directly on the bone color, with no white text
+       or its halo bleeding underneath (the halo blurs dark text). -->
+  <div
+    class="absolute inset-0 px-2 py-1 flex flex-col gap-2 z-10 pointer-events-none bar-text"
+    style={lightW > 0 ? `clip-path: inset(0 0 0 ${lightW}%)` : undefined}
+  >
     {@render content()}
   </div>
   <!-- Dark copy of the foreground, clipped to the light "Many Users" zone -->

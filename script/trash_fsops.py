@@ -14,6 +14,10 @@ cron runs cannot redirect a check, a rename or a delete:
 - stage_item: rename it into <fs>/.archive/<path>.<date>/<name>, as is
 - pack_archive: pack each staged item into <fs>/.archive/<path>.<date>.tar.gz
 
+Every reserved folder lives under the item's filesystem, or under `output`
+(a folder of one's own, from --output on mover.py/archiver.py) to test the
+whole flow without root.
+
 Moves are renames: instant at any size; owners, modes and ACLs untouched.
 Nothing here deletes from .trash: old trash is removed by hand
 (deploy/TRASH.md).
@@ -193,6 +197,26 @@ def open_reserved(fsfd, dev, name):
     return rfd
 
 
+def open_out_reserved(t, output, name, opener):
+    """The reserved folder `name` on the filesystem of target `t`, or under
+    `output` (an absolute path) when given: (its fd, the path its contents
+    are reported under). The output tree is a normal folder of one's own,
+    opened without the fs-root walk: with --output the reserved folders live
+    in it, so a user cannot plant them on the filesystem itself."""
+    if not output:
+        return opener(t.fsfd, t.dev), t.fs
+    os.makedirs(output, exist_ok=True)
+    otop = os.path.join(output, os.path.basename(t.fs.rstrip("/")) or "root")
+    os.makedirs(otop, exist_ok=True)
+    ofd = os.open(otop, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        rfd = open_reserved(ofd, os.fstat(ofd).st_dev, name)
+    except BaseException:
+        os.close(ofd)
+        raise
+    return rfd, otop
+
+
 def open_trash(fsfd, dev):
     return open_reserved(fsfd, dev, ".trash")
 
@@ -269,15 +293,17 @@ def _rename_checked(t, dfd, dname, dest):
     return moved
 
 
-def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
+def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None,
+              output=None):
     """Check and move one item into the trash, as is; return where it ended
-    up. Restore is a rename back. Raises Skip when it must stay, another
-    exception on failure."""
+    up. Restore is a rename back. `output` moves the trash folder out of the
+    filesystem (a folder of one's own, to test without root). Raises Skip
+    when it must stay, another exception on failure."""
     t = open_target(item, check_mount, allowed_fs, min_uid)
     try:
-        tfd = open_trash(t.fsfd, t.dev)
+        tfd, ttop = open_out_reserved(t, output, ".trash", open_trash)
         try:
-            dpfd, dname, dest = make_dest(tfd, t.fs, today, t.rel)
+            dpfd, dname, dest = make_dest(tfd, ttop, today, t.rel)
             try:
                 _rename_checked(t, dpfd, dname, dest)
                 return dest
@@ -289,20 +315,24 @@ def move_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
         t.close()
 
 
-def stage_item(item, today, check_mount=True, allowed_fs=None, min_uid=None):
+def stage_item(item, today, check_mount=True, allowed_fs=None, min_uid=None,
+               output=None):
     """Check one item queued for the archive and move it, as is, into the
     root-only <fs>/.archive/<path>.<date>/<name>; archiver.py packs it later
-    into <path>.<date>.tar.gz. Returns where it is now. Restore is a rename
-    back. Raises Skip when it must stay, another exception on failure."""
+    into <path>.<date>.tar.gz. `output` moves the archive folder out of the
+    filesystem (a folder of one's own, to test without root). Returns where
+    it is now. Restore is a rename back. Raises Skip when it must stay,
+    another exception on failure."""
     if item.get("action") != "archive":
         raise Skip("not queued for the archive")
     t = open_target(item, check_mount, allowed_fs, min_uid)
     try:
-        afd = open_reserved(t.fsfd, t.dev, ".archive")
+        afd, atop = open_out_reserved(t, output, ".archive",
+                                      lambda fsfd, dev: open_reserved(fsfd, dev, ".archive"))
         try:
             *parents, last = t.rel.split("/")
             parts = parents + [f"{last}.{today.isoformat()}"]
-            dpfd, stage, dest = _make_dest(afd, os.path.join(t.fs, ".archive"), parts, ".tar.gz")
+            dpfd, stage, dest = _make_dest(afd, os.path.join(atop, ".archive"), parts, ".tar.gz")
             try:
                 os.mkdir(stage, 0o700, dir_fd=dpfd)
                 sfd = _open_dir(stage, dpfd)
@@ -410,18 +440,24 @@ def pack_stage(pfd, stage, name, dest):
     return dest + ".tar.gz"
 
 
-def pack_archive(fs, dry_run=False):
+def pack_archive(fs, dry_run=False, output=None):
     """Pack every item staged in <fs>/.archive; yield (staged path, archive
     path or None, error or None) per item (dry_run: only find them). A
-    filesystem with no .archive has nothing."""
-    fsfd = os.open(fs, os.O_RDONLY | os.O_DIRECTORY)
+    filesystem with no .archive has nothing. `output` packs what was staged
+    under it instead (from --output, to test without root)."""
+    top = fs
+    if output:
+        os.makedirs(output, exist_ok=True)
+        top = os.path.join(output, os.path.basename(fs.rstrip("/")) or "root")
+        os.makedirs(top, exist_ok=True)
+    fsfd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
     try:
         afd = open_existing_reserved(fsfd, os.fstat(fsfd).st_dev, ".archive")
         if afd is None:
             return
         try:
             for pfd, rel, stage, name in find_stages(afd):
-                dest = os.path.normpath(os.path.join(fs, ".archive", rel, stage))
+                dest = os.path.normpath(os.path.join(top, ".archive", rel, stage))
                 staged = os.path.join(dest, name)
                 if dry_run:
                     yield staged, None, None

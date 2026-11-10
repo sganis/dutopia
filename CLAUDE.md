@@ -120,6 +120,8 @@ Uses `#[cfg(...)]` conditional compilation throughout. Key differences:
 - `TRASH_KEEP_DAYS` — Days moved items stay in `<fs>/.trash` before they are deleted by hand (default 30); served in `/api/health`, quoted by the UI and the Notify email
 - `TRASH_TOKEN` — Bearer token the mover cron (`script/mover.py`) sends to `POST /api/trash/claim`; claim is refused when unset
 - `ADMIN_PASSWORD` — Password login with this value succeeds for any username, as global admin. Active in release builds too (container mode with no local accounts), so treat it as a secret
+- `MANY_USERS_PX` — Width in px under which the SPA merges thin user segments into one "Many Users" block (default 2, `0` disables grouping); served in `/api/health`
+- `MANY_USERS_COLOR` — Color of that block, `#RRGGBB` only (default `#D2CCBC`); served in `/api/health`
 
 ## CI/CD
 

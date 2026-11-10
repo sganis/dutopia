@@ -20,6 +20,10 @@ data:
   # they are deleted by hand (the UI quotes it). Defaults:
   # TRASH_UNDO_HOURS: "24"
   # TRASH_KEEP_DAYS: "30"
+  # SPA "Many Users" block: segment width (px) that merges into it, and its
+  # color (#RRGGBB only). Defaults:
+  # MANY_USERS_PX: "2"
+  # MANY_USERS_COLOR: "#D2CCBC"
   REQUEST_TIMEOUT_SECS: "30"
   MAX_BODY_BYTES: "65536"
   MAX_PAGE_SIZE: "2000"

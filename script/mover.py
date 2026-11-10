@@ -3,12 +3,16 @@
 """Dutopia nightly mover (Python 3 stdlib only), run as root by cron.
 
   mover.py --api URL --token-file F --fs FS [--fs FS] [--dry-run]
+          [--output DIR]
 
 Claims what was queued over TRASH_UNDO_HOURS ago on the filesystems this
 node mounts, saves the batch, and moves each item as is (a rename: instant
 at any size; owners, modes and ACLs untouched), one log line per item:
   trash:   <fs>/.trash/<date>/<path>
   archive: <fs>/.archive/<path>.<date>/<name>  (archiver.py packs it later)
+With --output DIR both folders live under it instead (one per filesystem,
+to test the whole flow without root); the items still move on the real
+filesystems.
 Items that are gone, not their owner's, a folder holding other owners'
 files, or reached through a symlink are skipped (see trash_fsops.py).
 Nothing is deleted. Exit status 1 when anything failed. Runbook:
@@ -25,8 +29,10 @@ import urllib.request
 
 import trash_fsops as fsops
 
-STATE_DIR = "/var/lib/dutopia-mover"
-# What is done with an item, by its queue action.
+
+STATE_DIR = os.path.expanduser("~/.dutopia-mover")
+# What is done with an item, by its queue action. Both movers take the same
+# options, so --output flows to both untouched.
 MOVERS = {"trash": fsops.move_item, "archive": fsops.stage_item}
 
 
@@ -125,10 +131,13 @@ def save_batch(state_dir, today, items):
     return path
 
 
-def run(items, today, check_mount=True, allowed_fs=None, min_uid=None, dry_run=False):
+def run(items, today, check_mount=True, allowed_fs=None, min_uid=None, dry_run=False,
+        output=None):
     """Move every item where its action says; return the number of failures.
-    dry_run runs every check but moves nothing. Each item's result is one
-    log line: ok, skip or err."""
+    dry_run runs every check but moves nothing. `output` is the --output
+    folder: the trash and archive live under it instead of each filesystem
+    (to test without root). Each item's result is one log line: ok, skip or
+    err."""
     errors = 0
     for item in items:
         path, action = item.get("path"), action_of(item)
@@ -140,7 +149,7 @@ def run(items, today, check_mount=True, allowed_fs=None, min_uid=None, dry_run=F
                 fsops.open_target(item, check_mount, allowed_fs, min_uid).close()
                 log(f"would {action}", path)
             else:
-                dest = mover(item, today, check_mount, allowed_fs, min_uid)
+                dest = mover(item, today, check_mount, allowed_fs, min_uid, output)
                 log("ok", f"{path} -> {dest}")
         except fsops.Skip as e:
             log("skip", f"{path}: {e}")
@@ -174,6 +183,8 @@ def main(argv=None):
     ap.add_argument("--fs", action="append", metavar="FS",
                     help="filesystem this node handles (repeat)")
     ap.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
+    ap.add_argument("--output", metavar="DIR",
+                    help="folder to hold .trash/.archive instead of each filesystem (testing; as a normal user)")
     ap.add_argument("--token-file", help="file with TRASH_TOKEN (default: $TRASH_TOKEN)")
     ap.add_argument("--batch", help="redo a saved batch instead of claiming")
     ap.add_argument("--cafile", help="CA bundle for a private-CA Route")
@@ -210,7 +221,8 @@ def work(args, token, today):
     """Claim (or load --batch) and move; return the exit code."""
     allowed = {f.rstrip("/") or "/" for f in args.fs} if args.fs else None
     opts = dict(check_mount=not args.dev, allowed_fs=allowed,
-                min_uid=0 if args.dev else fsops.MIN_UID, dry_run=args.dry_run)
+                min_uid=0 if args.dev else fsops.MIN_UID, dry_run=args.dry_run,
+                output=args.output)
     if args.batch:
         with open(args.batch) as f:
             return 1 if run(json.load(f), today, **opts) else 0

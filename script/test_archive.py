@@ -169,6 +169,19 @@ class Pack(ArchiveFs):
     def test_no_archive_folder_is_nothing_to_do(self):
         self.assertEqual(self.archiver(), (0, ""))
 
+    def test_output_packs_the_archive_staged_there(self):
+        self.mk("a/f")
+        out = os.path.join(self.state, "out")
+        staged = fsops.stage_item(self.item(os.path.join(self.fs, "a/f")), TODAY,
+                                  check_mount=False, output=out)
+        fs = os.path.basename(self.fs)
+        self.assertEqual(staged, os.path.join(out, fs, f".archive/a/f.{DAY}/f"))
+        self.assertFalse(os.path.exists(os.path.join(self.fs, ".archive")))
+        rc, log = self.archiver("--output", out)
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(os.listdir(os.path.join(out, fs, ".archive/a")), [f"f.{DAY}.tar.gz"])
+        self.assertIn(f"-> {os.path.join(out, fs, '.archive/a', f'f.{DAY}.tar.gz')}", log)
+
     def test_needs_a_filesystem(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             archiver.main(["--dev"])

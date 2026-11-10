@@ -36,6 +36,14 @@ class Api {
   public trashUndoHours: number = $state(24);
   /** Mirrors /api/health.trash_keep_days: how long moved items stay in .trash. */
   public trashKeepDays: number = $state(30);
+  /** Mirrors /api/health.many_users_px: bar segment width (px) that merges
+   *  into the "Many Users" block. 0 disables grouping. */
+  public manyUsersPx: number = $state(2);
+  /** Mirrors /api/health.many_users_color: color of that block. */
+  public manyUsersColor: string = $state("#D2CCBC");
+  /** Mirrors /api/health.bar_empty_color: background of the empty part of
+   *  the stat bars. */
+  public barEmptyColor: string = $state("#262626");
 
   private async request<T>(
     endpoint: string = "",
@@ -129,6 +137,9 @@ class Api {
       this.filesystems = Array.isArray(data?.filesystems) ? data.filesystems : [];
       if (typeof data?.trash_undo_hours === 'number') this.trashUndoHours = data.trash_undo_hours;
       if (typeof data?.trash_keep_days === 'number') this.trashKeepDays = data.trash_keep_days;
+      if (typeof data?.many_users_px === 'number') this.manyUsersPx = data.many_users_px;
+      if (typeof data?.many_users_color === 'string') this.manyUsersColor = data.many_users_color;
+      if (typeof data?.bar_empty_color === 'string') this.barEmptyColor = data.bar_empty_color;
       await initDbVersion(typeof data?.db_version === 'string' ? data.db_version : null);
     } catch {
       /* network hiccup — leave smtpConfigured and the version at previous values */

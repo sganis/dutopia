@@ -2,7 +2,8 @@
 <script lang="ts">
   import type { SvelteMap } from "svelte/reactivity";
   import { humanBytes, humanCount, humanTime } from "../ts/util";
-  import { groupSmallUsers, MANY_COLOR, MANY_USERS } from "../ts/manyusers";
+  import { groupSmallUsers, MANY_USERS } from "../ts/manyusers";
+  import { api } from "$api";
 
   type UserStatsJson = {
     username: string;
@@ -70,7 +71,7 @@
     const total = toNum(
       sortBy === "disk" ? pathTotals.total_disk : sortBy === "size" ? pathTotals.total_size : pathTotals.total_count,
     );
-    return groupSmallUsers(sortedUserEntries(pathTotals), userMetricFor, total, rowW).map(([uname, userData]) => ({
+    return groupSmallUsers(sortedUserEntries(pathTotals), userMetricFor, total, rowW, api.manyUsersPx).map(([uname, userData]) => ({
       uname,
       userData,
       userPercent: total > 0 ? (userMetricFor(userData) / total) * 100 : 0,
@@ -90,14 +91,14 @@
   }
 </script>
 
-<div class="relative px-2 bg-gray-700 rounded overflow-hidden text-sm p-1" bind:clientWidth={rowW}>
+<div class="relative px-2 rounded overflow-hidden text-sm p-1 h-8 shrink-0" style="background-color: {api.barEmptyColor}" bind:clientWidth={rowW}>
   <!-- Total bar background -->
   <div class="flex absolute left-0 top-0 bottom-0 z-0" style="width: 100%">
     {#each segments as { uname, userData, userPercent } (uname)}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
-        class="h-full transition-all duration-300 min-w-[0.5px] hover:opacity-90"
-        style="width: {userPercent}%; background-color: {uname === MANY_USERS ? MANY_COLOR : userColors.get(uname)};"
+        class="h-full transition-all duration-300 min-w-[0.5px] hover:opacity-90 border-r border-r-gray-600 last:border-r-0"
+        style="width: {userPercent}%; background-color: {uname === MANY_USERS ? api.manyUsersColor : userColors.get(uname)};"
         onmouseenter={(e) => onUserHover?.(e, userData, userPercent)}
         onmousemove={onUserMove}
         onmouseleave={onUserLeave}
@@ -106,14 +107,17 @@
     {/each}
   </div>
   {#snippet content()}
-    <div class="flex items-center justify-end">
+    <div class="flex items-center justify-end whitespace-nowrap">
       {humanCount(pathTotals.total_count)} Files
       • Changed {humanTime(pathTotals.modified)}
       • {humanBytes(pathTotals.total_disk)}
     </div>
   {/snippet}
-  <!-- Total bar foreground -->
-  <div class="relative z-10 pointer-events-none">
+  <!-- Total bar foreground. Clipped to exclude the light zone: see FolderBar. -->
+  <div
+    class="absolute inset-0 px-2 p-1 z-10 pointer-events-none bar-text"
+    style={lightW > 0 ? `clip-path: inset(0 0 0 ${lightW}%)` : undefined}
+  >
     {@render content()}
   </div>
   <!-- Dark copy of the foreground, clipped to the light "Many Users" zone -->

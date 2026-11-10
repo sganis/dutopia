@@ -560,3 +560,39 @@ async fn test_health_reports_trash_keep_days() {
     assert_eq!(keep_days().await, 30);
     unsafe { std::env::remove_var("TRASH_KEEP_DAYS") };
 }
+
+#[tokio::test]
+#[serial]
+async fn test_health_reports_many_users() {
+    init_db_once();
+    let many = || async {
+        let resp = health_handler().await.into_response();
+        let body = to_bytes(resp.into_body(), TEST_BODY_LIMIT).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (v["many_users_px"].clone(), v["many_users_color"].clone(), v["bar_empty_color"].clone())
+    };
+    unsafe { std::env::remove_var("MANY_USERS_PX") };
+    unsafe { std::env::remove_var("MANY_USERS_COLOR") };
+    unsafe { std::env::remove_var("BAR_EMPTY_COLOR") };
+    let (px, color, empty) = many().await;
+    assert_eq!(px, 2.0);
+    assert_eq!(color, "#D2CCBC");
+    assert_eq!(empty, "#262626");
+    unsafe { std::env::set_var("MANY_USERS_PX", "6") };
+    unsafe { std::env::set_var("MANY_USERS_COLOR", "#FFFFFF") };
+    unsafe { std::env::set_var("BAR_EMPTY_COLOR", "#112233") };
+    let (px, color, empty) = many().await;
+    assert_eq!(px, 6.0);
+    assert_eq!(color, "#FFFFFF");
+    assert_eq!(empty, "#112233");
+    unsafe { std::env::set_var("MANY_USERS_PX", "nope") };
+    unsafe { std::env::set_var("MANY_USERS_COLOR", "red;x:y") };
+    unsafe { std::env::set_var("BAR_EMPTY_COLOR", "gray") };
+    let (px, color, empty) = many().await;
+    assert_eq!(px, 2.0);
+    assert_eq!(color, "#D2CCBC");
+    assert_eq!(empty, "#262626");
+    unsafe { std::env::remove_var("MANY_USERS_PX") };
+    unsafe { std::env::remove_var("MANY_USERS_COLOR") };
+    unsafe { std::env::remove_var("BAR_EMPTY_COLOR") };
+}

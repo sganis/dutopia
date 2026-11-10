@@ -286,6 +286,20 @@ class EndToEnd(Fs):
         self.assertEqual(tm.run([{**self.item(f), "action": "shred"}], TODAY, check_mount=False), 1)
         self.assertTrue(os.path.isfile(f))
 
+    def test_output_moves_the_reserved_folders_out_of_the_fs(self):
+        f = self.mk("p/file")
+        self.mk("p/dir/x")
+        archive = {**self.item(self.fs + "/p/dir"), "action": "archive"}
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(tm.run([self.item(f), archive], TODAY, check_mount=False,
+                                   output=out), 0)
+            top = os.path.join(out, os.path.basename(self.fs))
+            self.assertTrue(os.path.isfile(os.path.join(top, ".trash", "2026-11-04", "p", "file")))
+            self.assertTrue(os.path.isdir(os.path.join(top, ".archive", "p", "dir.2026-11-04", "dir")))
+        self.assertFalse(os.path.exists(os.path.join(self.fs, ".trash")))
+        self.assertFalse(os.path.exists(os.path.join(self.fs, ".archive")))
+        self.assertFalse(os.path.exists(f))
+
 
 def run_main(api, *args, env=None):
     """main() against `api` with a temp HOME and TRASH_TOKEN=tok."""
